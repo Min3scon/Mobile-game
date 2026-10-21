@@ -62,4 +62,6 @@ Test switches (localhost only):
 | `src/render.js` | Canvas drawing |
 | `src/audio.js` | Synthesized sound and music |
 | `supabase/schema.sql` | Database, access rules and anti-cheat functions |
+| `src/guard.js` | In-game anti-cheat: 30-second checkpoints, tamper and speed checks |
+| `src/update.js` | Auto-update: reloads into new versions, and learns the server's clock |
 | `tools/build.mjs` | Production build |

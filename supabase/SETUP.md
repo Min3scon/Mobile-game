@@ -61,6 +61,47 @@ Open the game and go to **Online**. You should see **Log in or sign up** instead
   - Totals are checked against the run time.
   - The daily run is limited to once per day per account.
 
+## Anti-cheat
+
+- **Checkpoints.** Every 30 seconds of play, the game reports its progress (time, kills, level). The server checks each report:
+  - It must move forward.
+  - It must keep pace with real time, so sped-up games are rejected.
+  - It must stay under hard caps worked out from the game's own spawn rates.
+- **Final score checks.**
+  - The final score must match the checkpoints.
+  - Runs with too few checkpoints are rejected.
+  - Scores that are possible but unusual (missing checkpoints, very high kill counts, a game clock faster than real time) are saved but hidden. They wait in the admin review queue.
+- **In-game guard.** The game also checks itself for edited values, sped-up clocks and open developer tools. When it catches something, the run isn't posted and the server records a tamper report for admins.
+- **Daily rewards follow the server's clock.** Changing the phone's date doesn't unlock tomorrow's rewards.
+
+## Admin and bans
+
+The account named exactly **Minescon** is the admin. The admin gets an **Admin** button under **Online**, where they can:
+
+- search players and see their scores, tamper reports and ban history;
+- ban for 1 hour, 1 day, 3 days, 1 week, 30 days or permanently, or for any number of minutes, hours, days or weeks, with a reason the player sees;
+- lift a ban;
+- approve or remove flagged scores;
+- delete all of a player's scores.
+
+Banned players can still play offline. They can't post scores, hit the raid, duel or change their name, and they don't appear on the leaderboard.
+
+Admin rights are granted when `schema.sql` runs. If the Minescon account didn't exist yet at that point, sign up as Minescon, then run this in the SQL Editor:
+
+```sql
+select private.grant_admin('Minescon');
+```
+
+To add another admin, use the same line with their exact name.
+
+## Updating the database
+
+When the game gets a database update, open **SQL Editor** > **New query**, paste the whole new `supabase/schema.sql`, and click **Run**. It's safe to run again: nothing is lost.
+
+## Updates reach players automatically
+
+Every published version has its own build number. The game checks for a new one when it opens, when you come back to it, and every 2 minutes. If there's a newer version, the menus reload into it straight away. During a run, it waits until the run ends.
+
 ## Free plan limits
 
 The free plan covers a group of friends easily. Live co-op sends many small messages: a 4-player, 8-minute run uses roughly 25,000 of the 2 million Realtime messages a month. You can see usage under **Project Settings** > **Usage**.

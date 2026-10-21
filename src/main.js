@@ -7,6 +7,7 @@ if (typeof Online === 'undefined') {
   window.Online = {
     init: async () => {}, mode: 'off', available: false, user: null, onAuth: () => () => {}, onRecovery: () => {}, startRun: off, updatePassword: off, deleteAccount: off, status: 'failed: online.js did not load',
     signUp: off, signIn: off, signOut: off, resetPassword: off, setUsername: off, loadSave: async () => null, pushSave: off,
+    checkpoint: off, reportRun: off, myStatus: async () => null, admin: off,
     submitScore: off, leaderboard: async () => [], myBest: async () => null, raid: async () => null, raidHit: off, raidClaim: off,
     duelCreate: off, duelGet: async () => null, duelSubmit: off, myDuels: async () => [], watchOnline: () => () => {}, room: null,
   };
@@ -48,6 +49,7 @@ let starting = false;
 
 async function startRun(opts) {
   if (starting) return;
+  if (Updater.idle()) return; // a new version is live: load it before the next run
   Sound.unlock();
   const resume = opts.resume || null;
   const charId = opts.charId || (resume ? resume.charId : save.selChar);
@@ -84,6 +86,8 @@ async function startRun(opts) {
   });
   game.duelCode = opts.duelCode || null;
   game.runId = runId;
+  Guard.start(game);
+  if (online) refreshStatus();
   if (!resume && online && !runId && mode === 'normal') {
     const g = game;
     Online.startRun({ mode, sector, seed: g.seed }).then((res) => { if (res.ok && game === g) g.runId = res.runId; });
@@ -105,12 +109,16 @@ function beginGame() {
 async function onRunOver(r) {
   Input.setEnabled(false);
   const duelCode = game && game.duelCode;
-  const online = Online.available && Online.user && r.runId;
+  const cheat = Guard.verify(game, r);
+  if (cheat && r.runId && Online.user) Online.reportRun(r.runId, cheat);
+  const online = Online.available && Online.user && r.runId && !cheat;
   const raidDmg = online && r.mode !== 'duel' && r.time > 20 ? raidDamageFor(r) : 0;
   const sum = applyRunResult(r, { raidDmg });
   UI.showOver(r, sum);
   if (!online) {
-    if (Online.available && !Online.user) UI.setOverOnline(`<p class="hint">${icon('user')} <button class="link" data-act="go" data-to="account">Log in</button> to post scores and hit the raid boss.</p>`);
+    if (cheat) UI.setOverOnline(`<p class="hint">${icon('shield')} Not posted: the anti-cheat check failed (${escHtml(cheat)}).</p>`);
+    else if (playerStatus && playerStatus.ban && Online.user) UI.setOverOnline(`<p class="hint">${escHtml(banText(playerStatus.ban))}. Scores, raids and duels are off until then.</p>`);
+    else if (Online.available && !Online.user) UI.setOverOnline(`<p class="hint">${icon('user')} <button class="link" data-act="go" data-to="account">Log in</button> to post scores and hit the raid boss.</p>`);
     else if (Online.available) UI.setOverOnline(`<p class="hint">This run was offline, so it was not posted.</p>`);
     return;
   }
@@ -124,7 +132,8 @@ async function onRunOver(r) {
     const res = await Online.submitScore({
       runId: r.runId, score: r.score, time: Math.round(r.time), kills: r.kills, level: r.level, pilot: r.charId, won: r.won, sector: r.sector,
     });
-    if (res.ok && res.rank) lines.push(`<p class="unlock">${icon('star')} #${res.rank} on the ${r.mode === 'daily' ? 'daily' : 'all-time'} leaderboard</p>`);
+    if (res.ok && res.flagged) lines.push(`<p class="hint">${icon('shield')} Score saved. It shows on the leaderboard once an admin checks it.</p>`);
+    else if (res.ok && res.rank) lines.push(`<p class="unlock">${icon('star')} #${res.rank} on the ${r.mode === 'daily' ? 'daily' : 'all-time'} leaderboard</p>`);
     else if (!res.ok) lines.push(`<p class="hint">Score not posted: ${res.error}</p>`);
     paint();
   }
@@ -149,6 +158,7 @@ async function onRunOver(r) {
 }
 
 function exitToMenu(keepScreen) {
+  Guard.stop();
   if (game && !game.finished) {
     const snap = game.snapshot();
     if (snap) { save.run = snap; writeSave(); }
@@ -157,7 +167,22 @@ function exitToMenu(keepScreen) {
   game = null;
   Input.setEnabled(false);
   Sound.setIntensity(0);
+  if (Updater.idle()) return;
   if (!keepScreen) UI.showMenu();
+}
+
+// ---------- player status (admin, bans) ----------
+let playerStatus = null;
+
+function banText(b) {
+  return b.until ? `You are banned until ${new Date(b.until).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}${b.reason ? ': ' + b.reason : ''}`
+    : `You are banned permanently${b.reason ? ': ' + b.reason : ''}`;
+}
+
+async function refreshStatus() {
+  const st = Online.user ? await Online.myStatus() : null;
+  playerStatus = st;
+  UI.setStatus(st, st && st.ban ? banText(st.ban) : '');
 }
 
 // ---------- cloud save ----------
@@ -196,6 +221,7 @@ function cloudChoice(useCloud) {
 
 async function onAuthChange(user) {
   UI.rerender();
+  refreshStatus();
   if (!user) return;
   UI.retryInvite();
   const cloud = await Online.loadSave();
@@ -235,6 +261,7 @@ function frame(now) {
   if (game) {
     game.frame(dt);
     Coop.tick(dt);
+    Guard.tick();
     // A paused scene does not change, so draw it once and let the GPU rest.
     if (game.running() || !game._still || game.banner || game.role === 'client') {
       drawGame(game);
@@ -268,6 +295,7 @@ function autoQuality(dt) {
 }
 
 function onHide() {
+  Updater.hidden();
   if (game && !game.finished) {
     if (game.pause()) UI.showPause(game);
     const snap = game.snapshot();
@@ -278,9 +306,10 @@ function onHide() {
   Sound.suspend();
 }
 
-// Deterrents only: real protection is the server rejecting impossible results.
+// Deterrents and local checks; the real protection is the server rejecting impossible results.
 function guardDevtools() {
   if (DEV) return;
+  Guard.trapDevtools();
   try {
     console.log('%cStop!', 'font: 700 42px sans-serif; color: #ff3d8b');
     console.log('%cThis is a developer tool. Scores, raids and duels are checked by the server, so edits here will not count.', 'font: 16px sans-serif');
@@ -322,7 +351,7 @@ async function boot(hot) {
   Haptics.mount();
   setupCanvas(document.getElementById('game'));
   Input.attach(canvas);
-  UI.init({ startRun, exitToMenu, getGame: () => game, cloudPush, cloudChoice, connectOnline });
+  UI.init({ startRun, exitToMenu, getGame: () => game, cloudPush, cloudChoice, connectOnline, refreshStatus });
   UI.applySettings();
   autoUnlockPilots();
   UI.showMenu();
@@ -332,7 +361,8 @@ async function boot(hot) {
     else {
       lastFrame = performance.now();
       if (swReg) swReg.update().catch(() => {});
-      if (!game) { UI.maybeShowLogin(); refreshRaid(); }
+      Updater.check();
+      if (!game) { UI.maybeShowLogin(); refreshRaid(); refreshStatus(); }
     }
   });
   window.addEventListener('pagehide', onHide);
@@ -345,6 +375,7 @@ async function boot(hot) {
   window.addEventListener('contextmenu', (e) => { if (!e.target.closest('input, textarea')) e.preventDefault(); });
 
   registerSW();
+  Updater.init({ busy: () => !!game, running: () => !!(game && !game.finished) });
   lastFrame = performance.now();
   requestAnimationFrame(frame);
   if (DEV) window.__ns = { get game() { return game; }, get save() { return save; }, startRun, DEBUG };

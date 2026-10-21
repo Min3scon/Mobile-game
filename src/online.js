@@ -12,6 +12,8 @@ const Online = (() => {
   const rid = () => Math.random().toString(36).slice(2, 10);
   const NAME_RE = /^[A-Za-z0-9_]{3,16}$/;
   const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const ADMIN_RPCS = ['find', 'player', 'ban', 'unban', 'flagged', 'suspects', 'review', 'delete_scores'];
+  const banText = (b) => (b.until ? 'You are banned until ' + new Date(b.until).toISOString().slice(0, 16).replace('T', ' ') + ' UTC' : 'You are banned permanently') + (b.reason ? ': ' + b.reason : '');
 
   function setUser(u) {
     const same = JSON.stringify(u) === JSON.stringify(user);
@@ -170,7 +172,27 @@ const Online = (() => {
         const res = await rpc('submit_score', {
           p_run: r.runId, p_score: r.score, p_time: r.time, p_kills: r.kills, p_level: r.level, p_pilot: r.pilot, p_won: !!r.won, p_sector: r.sector || 1,
         });
-        return res.ok ? { ok: true, rank: res.data } : res;
+        if (!res.ok) return res;
+        const d = res.data && typeof res.data === 'object' ? res.data : { rank: res.data };
+        return { ok: true, rank: d.rank, flagged: !!d.flagged };
+      },
+      // Progress report every 30s of play; the server checks it against real time and hard caps.
+      async checkpoint(c) {
+        const res = await rpc('run_checkpoint', { p_run: c.runId, p_seq: c.seq, p_t: c.t, p_kills: c.kills, p_level: c.level });
+        return res.ok ? { ok: true } : res;
+      },
+      async myStatus() {
+        if (!user) return null;
+        const res = await rpc('my_status');
+        return res.ok ? res.data : null;
+      },
+      async reportRun(runId, reason) {
+        return rpc('report_run', { p_run: runId, p_reason: reason });
+      },
+      // Admin tools; the server refuses anyone who is not an admin.
+      async admin(name, args) {
+        if (!ADMIN_RPCS.includes(name)) return { ok: false, error: 'Unknown admin action' };
+        return rpc('admin_' + name, args);
       },
       async leaderboard(o) {
         const res = await rpc('leaderboard', { p_board: o.board, p_day: o.day || utcDay(), p_limit: o.limit || 50 });
@@ -264,6 +286,13 @@ const Online = (() => {
     const week = () => { const d = new Date(); const y = new Date(Date.UTC(d.getUTCFullYear(), 0, 1)); return d.getUTCFullYear() + '-W' + Math.ceil(((d - y) / 86400000 + y.getUTCDay() + 1) / 7); };
 
     function me() { return user ? users()[user.email] : null; }
+    const nameOf = (id) => (Object.values(users()).find((u) => u.id === id) || {}).username || null;
+    const isAdmin = (id) => nameOf(id) === 'Minescon';
+    function activeBan(id) {
+      return read('bans', []).filter((b) => b.uid === id && !b.lifted && (!b.until || Date.parse(b.until) > Date.now()))
+        .sort((a, b) => (b.until ? Date.parse(b.until) : Infinity) - (a.until ? Date.parse(a.until) : Infinity))[0] || null;
+    }
+    const banErr = () => { const b = user && activeBan(user.id); return b ? err(banText(b)) : null; };
     function checkRun(runId, modeWanted, time) {
       const runs = read('runs', {}), r = runs[runId];
       if (!r || r.uid !== user.id) return [null, 'Unknown run'];
@@ -275,7 +304,7 @@ const Online = (() => {
     function bestRows(board, day) {
       const by = {};
       for (const s of read('scores', [])) {
-        const ok = board === 'daily' ? s.mode === 'daily' && s.day === day : s.mode === 'normal' && (board === 'all' || s.week === week());
+        const ok = !s.flagged && !activeBan(s.uid) && (board === 'daily' ? s.mode === 'daily' && s.day === day : s.mode === 'normal' && (board === 'all' || s.week === week()));
         if (ok && (!by[s.uid] || s.score > by[s.uid].score)) by[s.uid] = s;
       }
       return Object.values(by).sort((a, b) => b.score - a.score);
@@ -328,6 +357,7 @@ const Online = (() => {
       async setUsername(name) {
         await lag();
         if (!NAME_RE.test(name || '')) return err('Names are 3-16 letters, numbers or _.');
+        if (banErr()) return banErr();
         const all = users();
         if (Object.values(all).some((u) => u.username.toLowerCase() === name.toLowerCase() && u.id !== user.id)) return err('That name is taken.');
         all[user.email].username = name;
@@ -351,6 +381,7 @@ const Online = (() => {
       async startRun(o) {
         await lag();
         if (!user) return err('Log in first');
+        if (banErr()) return banErr();
         const runs = read('runs', {}), mine = Object.values(runs).filter((r) => r.uid === user.id);
         if (mine.some((r) => Date.now() - r.at < 5000)) return err('Slow down a little');
         if (o.mode === 'daily' && mine.some((r) => r.mode === 'daily' && r.day === utcDay())) return err("You already played today's daily run");
@@ -365,18 +396,98 @@ const Online = (() => {
         if (!user) return err('Log in first');
         const [run, e, runs] = checkRun(r.runId, null, r.time);
         if (e) return err(e);
+        if (banErr()) return banErr();
         if (run.usedScore) return err('That run was already submitted');
         if (!['normal', 'daily'].includes(run.mode)) return err('Only solo runs go on the leaderboard');
-        if (r.won && r.time < 480) return err('Impossible win');
+        if (r.won && r.time < 485) return err('Impossible win');
+        const cps = run.cps || [], need = Math.max(0, Math.floor(r.time / 30) - 2), last = cps[cps.length - 1];
+        if (cps.length < Math.floor(need * 0.5)) return err('This run could not be verified');
+        if (last && (r.time < last.t || r.kills < last.kills || r.level < last.level)) return err('Run does not match its checkpoints');
         const expected = Math.floor((r.time * 10 + r.kills * 2 + r.level * 50 + (r.won ? 5000 : 0)) * mult[run.sector]);
         if (Math.abs(r.score - expected) > 30 * mult[run.sector]) return err('Score does not add up');
         run.usedScore = true;
         write('runs', runs);
         const scores = read('scores', []);
-        scores.push({ uid: user.id, score: r.score, time: r.time, kills: r.kills, level: r.level, pilot: r.pilot, won: !!r.won, sector: run.sector, mode: run.mode, day: run.day, week: week() });
+        scores.push({ id: rid(), flagged: cps.length < need, uid: user.id, score: r.score, time: r.time, kills: r.kills, level: r.level, pilot: r.pilot, won: !!r.won, sector: run.sector, mode: run.mode, day: run.day, week: week() });
         write('scores', scores);
         const rows = bestRows(run.mode === 'daily' ? 'daily' : 'all', run.day);
-        return { ok: true, rank: rows.filter((x) => x.uid !== user.id && x.score > r.score).length + 1 };
+        return { ok: true, rank: rows.filter((x) => x.uid !== user.id && x.score > r.score).length + 1, flagged: cps.length < need };
+      },
+      async checkpoint(c) {
+        await lag();
+        if (!user) return err('Log in first');
+        if (banErr()) return banErr();
+        const runs = read('runs', {}), r = runs[c.runId];
+        if (!r || r.uid !== user.id) return err('Unknown run');
+        if (r.usedScore) return err('That run is already finished');
+        r.cps = r.cps || [];
+        const prev = r.cps[r.cps.length - 1];
+        if (c.seq !== r.cps.length + 1) return err('Checkpoint out of order');
+        if (prev && Date.now() - prev.at < 15000) return err('Checkpoints too fast');
+        if (c.t > (Date.now() - r.at) / 1000 * 1.3 + 5) return err('Game clock is ahead of real time');
+        if (prev && (c.t < prev.t || c.kills < prev.kills || c.level < prev.level)) return err('Checkpoint went backwards');
+        r.cps.push({ t: c.t, kills: c.kills, level: c.level, at: Date.now() });
+        write('runs', runs);
+        return { ok: true };
+      },
+      async reportRun(runId, reason) {
+        await lag();
+        const runs = read('runs', {}), r = runs[runId];
+        if (r && user && r.uid === user.id && !r.tamper) { r.tamper = String(reason || 'unknown').slice(0, 100); r.usedScore = true; write('runs', runs); }
+        return { ok: true };
+      },
+      async myStatus() {
+        await lag();
+        if (!user) return null;
+        const b = activeBan(user.id);
+        return { admin: isAdmin(user.id), ban: b ? { until: b.until, reason: b.reason } : null };
+      },
+      async admin(name, a) {
+        await lag();
+        if (!user || !isAdmin(user.id)) return err('Admins only');
+        const all = Object.values(users()), scores = read('scores', []), bans = read('bans', []);
+        const player = (id) => {
+          const u = all.find((x) => x.id === id); if (!u) return null;
+          const mine = scores.filter((s) => s.uid === id), b = activeBan(id);
+          return { id, username: u.username, joined: u.joined || null, best: Math.max(0, ...mine.filter((s) => !s.flagged).map((s) => s.score)) || null,
+            runs: Object.values(read('runs', {})).filter((r) => r.uid === id).length, flagged: mine.filter((s) => s.flagged).length,
+            tamper: Object.values(read('runs', {})).filter((r) => r.uid === id && r.tamper).length,
+            admin: isAdmin(id), ban: b ? { until: b.until, reason: b.reason } : null };
+        };
+        if (name === 'find') {
+          const q = String(a.p_query || '').toLowerCase();
+          return { ok: true, data: all.filter((u) => u.username && u.username.toLowerCase().includes(q)).map((u) => player(u.id)) };
+        }
+        if (name === 'player') {
+          return { ok: true, data: { player: player(a.p_user),
+            scores: scores.filter((s) => s.uid === a.p_user).reverse().slice(0, 20).map((s) => ({ id: s.id, score: s.score, time_s: s.time, kills: s.kills, level: s.level, mode: s.mode, sector: s.sector, won: s.won, flagged: !!s.flagged, flag_reason: s.flagged ? 'missing checkpoints' : null })),
+            tamper: Object.values(read('runs', {})).filter((r) => r.uid === a.p_user && r.tamper).map((r) => ({ started_at: new Date(r.at).toISOString(), mode: r.mode, tamper: r.tamper })),
+            bans: bans.filter((b) => b.uid === a.p_user).reverse().map((b) => ({ created_at: b.at, until: b.until, reason: b.reason, lifted_at: b.lifted || null, by_name: nameOf(b.by) })) } };
+        }
+        if (name === 'ban') {
+          if (a.p_user === user.id) return err('You cannot ban yourself');
+          if (isAdmin(a.p_user)) return err('Admins cannot be banned');
+          if (a.p_minutes != null && (a.p_minutes < 1 || a.p_minutes > 5256000)) return err('Ban length must be between 1 minute and 10 years');
+          for (const b of bans) if (b.uid === a.p_user && !b.lifted) b.lifted = new Date().toISOString();
+          const b = { uid: a.p_user, by: user.id, at: new Date().toISOString(), reason: (a.p_reason || '').trim().slice(0, 200) || null,
+            until: a.p_minutes == null ? null : new Date(Date.now() + a.p_minutes * 60000).toISOString() };
+          bans.push(b); write('bans', bans);
+          return { ok: true, data: { until: b.until, reason: b.reason } };
+        }
+        if (name === 'unban') { for (const b of bans) if (b.uid === a.p_user && !b.lifted) b.lifted = new Date().toISOString(); write('bans', bans); return { ok: true, data: true }; }
+        if (name === 'flagged') {
+          return { ok: true, data: scores.filter((s) => s.flagged).reverse().map((s) => ({ id: s.id, user_id: s.uid, username: nameOf(s.uid) || 'Pilot', score: s.score, time_s: s.time, kills: s.kills, level: s.level, mode: s.mode, sector: s.sector, flag_reason: 'missing checkpoints' })) };
+        }
+        if (name === 'suspects') {
+          return { ok: true, data: all.map((u) => player(u.id)).filter((p) => p.flagged + p.tamper > 0).sort((x, y) => (y.flagged + y.tamper) - (x.flagged + x.tamper)) };
+        }
+        if (name === 'review') {
+          const i = scores.findIndex((s) => s.id === a.p_score);
+          if (i >= 0) { if (a.p_ok) scores[i].flagged = false; else scores.splice(i, 1); write('scores', scores); }
+          return { ok: true, data: true };
+        }
+        if (name === 'delete_scores') { const left = scores.filter((s) => s.uid !== a.p_user); write('scores', left); return { ok: true, data: scores.length - left.length }; }
+        return err('Unknown admin action');
       },
       async leaderboard(o) {
         await lag();
@@ -402,6 +513,7 @@ const Online = (() => {
       async raidHit(damage, runId, time) {
         await lag();
         if (!user) return err('Log in first');
+        if (banErr()) return banErr();
         const [run, e, runs] = checkRun(runId, null, time);
         if (e) return err(e);
         if (run.usedRaid) return err('That run already hit the raid');
@@ -419,6 +531,7 @@ const Online = (() => {
       },
       async raidClaim(id) {
         await lag();
+        if (banErr()) return banErr();
         const raids = read('raids', {}), r = Object.values(raids).find((x) => x.id === id);
         if (!r || !r.defeated) return err('The raid boss is still alive');
         const h = r.hits[user.id];
@@ -431,6 +544,7 @@ const Online = (() => {
       },
       async duelCreate(o) {
         await lag();
+        if (banErr()) return banErr();
         const [run, e, runs] = checkRun(o.runId, 'duel', o.time);
         if (e) return err(e);
         if (run.usedDuel) return err('That run already made a duel');
@@ -446,6 +560,7 @@ const Online = (() => {
       async duelGet(code) { await lag(); const d = read('duels', {})[String(code).toUpperCase()]; return d ? duelView(d) : null; },
       async duelSubmit(code, o) {
         await lag();
+        if (banErr()) return banErr();
         const duels = read('duels', {}), d = duels[String(code).toUpperCase()];
         if (!d) return err('No duel with that code');
         if (d.creator === user.id) return err('You cannot duel yourself');
@@ -537,10 +652,10 @@ const Online = (() => {
     room(code, info) { return drv ? drv.room(code, info) : null; },
     watchOnline(cb) { return drv ? drv.watchOnline(cb) : () => {}; },
   };
-  for (const name of ['signUp', 'signIn', 'signOut', 'resetPassword', 'updatePassword', 'setUsername', 'pushSave', 'deleteAccount', 'startRun', 'submitScore', 'raidHit', 'raidClaim', 'duelCreate', 'duelSubmit']) {
+  for (const name of ['signUp', 'signIn', 'signOut', 'resetPassword', 'updatePassword', 'setUsername', 'pushSave', 'deleteAccount', 'startRun', 'submitScore', 'checkpoint', 'reportRun', 'admin', 'raidHit', 'raidClaim', 'duelCreate', 'duelSubmit']) {
     api[name] = (...a) => (drv ? drv[name](...a).catch((e) => ({ ok: false, error: friendly(e && e.message) })) : offline());
   }
-  for (const name of ['loadSave', 'myBest', 'raid', 'duelGet']) {
+  for (const name of ['loadSave', 'myBest', 'myStatus', 'raid', 'duelGet']) {
     api[name] = (...a) => (drv ? drv[name](...a).catch(() => null) : Promise.resolve(null));
   }
   for (const name of ['leaderboard', 'myDuels']) {

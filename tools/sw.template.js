@@ -26,6 +26,7 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(req.url);
   const isFont = url.hostname === 'fonts.googleapis.com' || url.hostname === 'fonts.gstatic.com';
   if (url.origin !== self.location.origin && !isFont) return;
+  if (url.pathname.endsWith('/version.json')) return; // update checks always go to the network
   if (isFont) {
     e.respondWith(caches.match(req).then((hit) => hit || fetch(req).then((res) => {
       const copy = res.clone();

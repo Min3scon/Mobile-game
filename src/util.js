@@ -66,12 +66,25 @@ function fmtInt(n) {
   return Math.floor(n).toLocaleString('en-US');
 }
 
-function todayKey(d = new Date()) {
+// Server time, learned from the update check. Days roll over by it, so changing the phone's clock
+// does not skip ahead to tomorrow's rewards.
+const Clock = {
+  skew: 0,
+  synced: false,
+  now() { return Date.now() + this.skew; },
+  date() { return new Date(this.now()); },
+};
+
+function escHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function todayKey(d = Clock.date()) {
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 }
 
 // The daily run is global, so it rolls over at midnight UTC for everyone.
-function utcDay(d = new Date()) {
+function utcDay(d = Clock.date()) {
   return d.toISOString().slice(0, 10);
 }
 
