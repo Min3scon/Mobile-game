@@ -1,12 +1,28 @@
 'use strict';
-/* Neon Swarm — boot, main loop and app lifecycle */
+/* Neon Swarm — boot, main loop, app lifecycle, cloud sync */
+
+if (typeof Online === 'undefined') {
+  // online.js missing: behave as a fully offline game.
+  const off = async () => ({ ok: false, error: 'Online features are not available' });
+  window.Online = {
+    init: async () => {}, mode: 'off', available: false, user: null, onAuth: () => () => {}, onRecovery: () => {}, startRun: off, updatePassword: off, deleteAccount: off,
+    signUp: off, signIn: off, signOut: off, resetPassword: off, setUsername: off, loadSave: async () => null, pushSave: off,
+    submitScore: off, leaderboard: async () => [], myBest: async () => null, raid: async () => null, raidHit: off, raidClaim: off,
+    duelCreate: off, duelGet: async () => null, duelSubmit: off, myDuels: async () => [], watchOnline: () => () => {}, room: null,
+  };
+}
 
 let game = null;
 let lastFrame = 0;
 let swReg = null;
+let pushTimer = 0, pendingCloud = null;
 const perf = { acc: 0, frames: 0, slow: 0 };
 
+const DEV = /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
+
+// Test switches only work on a developer's own machine, never on the published game.
 function parseDebug() {
+  if (!DEV) return;
   let q;
   try { q = new URLSearchParams(location.search); } catch (e) { return; }
   if (q.has('bot')) DEBUG.bot = true;
@@ -15,33 +31,128 @@ function parseDebug() {
   if (q.has('t')) DEBUG.startAt = Math.max(0, (+q.get('t') || 0) * 60);
 }
 
-function startRun(opts) {
+// Everything a ship needs from your account: shop ranks, pilot mastery and equipped pets.
+function localMeta(charId) {
+  return {
+    shop: Object.assign({}, save.shop),
+    mastery: masteryLevel(charId),
+    pets: equippedPets(),
+  };
+}
+
+function myName() {
+  return (Online.user && Online.user.username) || CHARS[save.selChar].name;
+}
+
+let starting = false;
+
+async function startRun(opts) {
+  if (starting) return;
   Sound.unlock();
   const resume = opts.resume || null;
-  const charId = resume ? resume.charId : save.selChar;
-  if (opts.daily && !resume) touchDaily();
+  const charId = opts.charId || (resume ? resume.charId : save.selChar);
+  const mode = resume ? resume.mode || (resume.daily ? 'daily' : 'normal') : opts.mode || 'normal';
+  const sector = resume ? resume.sector || 1 : mode === 'normal' ? clamp(opts.sector || save.sector || 1, 1, save.sectorMax) : 1;
+  let seed = resume ? resume.seed : opts.seed;
+  let runId = resume ? resume.runId || null : null;
+  if (mode === 'daily' && !resume) {
+    if (playedDailyToday()) { UI.toast("You already played today's daily run. Come back tomorrow!"); return; }
+    seed = dailySeed();
+  }
+  const online = Online.available && Online.user;
+  // Daily and duel runs need their server ticket up front: it enforces once-a-day and the duel seed.
+  if (!resume && online && (mode === 'daily' || mode === 'duel')) {
+    starting = true;
+    UI.toast('Connecting…');
+    const res = await Online.startRun({ mode, sector, seed });
+    starting = false;
+    if (!res.ok && /already played/i.test(res.error || '')) {
+      touchDaily();
+      UI.toast(res.error);
+      UI.rerender();
+      return;
+    }
+    if (res.ok) runId = res.runId;
+    else UI.toast('Playing offline: ' + res.error);
+  }
+  if (mode === 'daily' && !resume) touchDaily();
   game = new Game({
-    charId, daily: !!opts.daily, resume,
+    mode, resume, sector, seed,
+    ships: [{ id: 'me', name: myName(), charId, meta: localMeta(charId) }],
+    localId: 'me',
     hooks: { levelUp: UI.showLevelUp, chest: UI.showChest, over: onRunOver },
   });
+  game.duelCode = opts.duelCode || null;
+  game.runId = runId;
+  if (!resume && online && !runId && mode === 'normal') {
+    const g = game;
+    Online.startRun({ mode, sector, seed: g.seed }).then((res) => { if (res.ok && game === g) g.runId = res.runId; });
+  }
+  beginGame();
+}
+
+// Shared by solo runs and co-op (coop.js builds its own Game).
+function beginGame() {
   save.run = null;
   writeSave();
   perf.acc = perf.frames = perf.slow = 0;
   Input.setEnabled(true);
-  if (!resume) Sound.setIntensity(0);
+  if (!game.boss) Sound.setIntensity(0);
   if (save.settings.music) Sound.startMusic();
   UI.enterGame();
 }
 
-function onRunOver(result) {
+async function onRunOver(r) {
   Input.setEnabled(false);
-  UI.showOver(result);
+  const duelCode = game && game.duelCode;
+  const online = Online.available && Online.user && r.runId;
+  const raidDmg = online && r.mode !== 'duel' && r.time > 20 ? raidDamageFor(r) : 0;
+  const sum = applyRunResult(r, { raidDmg });
+  UI.showOver(r, sum);
+  if (!online) {
+    if (Online.available && !Online.user) UI.setOverOnline(`<p class="hint">${icon('user')} <button class="link" data-act="go" data-to="account">Log in</button> to post scores and hit the raid boss.</p>`);
+    else if (Online.available) UI.setOverOnline(`<p class="hint">This run was offline, so it was not posted.</p>`);
+    return;
+  }
+  const lines = [];
+  const paint = () => UI.setOverOnline(lines.join(''));
+  if (r.mode === 'duel' && !duelCode) {
+    lines.push(`<button class="btn" data-act="duel-send">${icon('swords')} Challenge a friend with this run</button>`);
+    paint();
+  }
+  if (r.time >= 10 && (r.mode === 'normal' || r.mode === 'daily')) {
+    const res = await Online.submitScore({
+      runId: r.runId, score: r.score, time: Math.round(r.time), kills: r.kills, level: r.level, pilot: r.charId, won: r.won, sector: r.sector,
+    });
+    if (res.ok && res.rank) lines.push(`<p class="unlock">${icon('star')} #${res.rank} on the ${r.mode === 'daily' ? 'daily' : 'all-time'} leaderboard</p>`);
+    else if (!res.ok) lines.push(`<p class="hint">Score not posted: ${res.error}</p>`);
+    paint();
+  }
+  if (raidDmg > 0) {
+    const res = await Online.raidHit(raidDmg, r.runId, r.time);
+    if (res.ok) lines.push(`<p class="unlock">${icon('boss')} ${fmtInt(res.damage)} raid damage${res.defeated ? ' · the raid boss is down!' : ''}</p>`);
+    paint();
+    refreshRaid();
+  }
+  if (duelCode) {
+    const res = await Online.duelSubmit(duelCode, { runId: r.runId, score: r.score, time: Math.round(r.time), kills: r.kills });
+    if (res.ok) {
+      if (res.won) {
+        save.stats.duelWins++;
+        save.gems += 20;
+        writeSave();
+      }
+      lines.push(`<p class="unlock">${icon('swords')} ${res.won ? 'You won the duel! +20 gems' : 'You lost the duel this time'}</p>`);
+    } else lines.push(`<p class="hint">${res.error || 'Could not send your duel score'}</p>`);
+    paint();
+  }
 }
 
 function exitToMenu(keepScreen) {
   if (game && !game.finished) {
     const snap = game.snapshot();
     if (snap) { save.run = snap; writeSave(); }
+    if (game.role !== 'solo') Coop.leave();
   }
   game = null;
   Input.setEnabled(false);
@@ -49,6 +160,72 @@ function exitToMenu(keepScreen) {
   if (!keepScreen) UI.showMenu();
 }
 
+// ---------- cloud save ----------
+function progressScore(s) {
+  return (s.stats ? s.stats.runs || 0 : 0) * 10 + (s.rank || 1) * 100 + (s.stats ? s.stats.totalGold || 0 : 0) / 10;
+}
+
+async function cloudPush() {
+  if (!Online.user) return false;
+  clearTimeout(pushTimer);
+  const res = await Online.pushSave(packSave(Object.assign({}, save, { run: null })));
+  if (res.ok) {
+    save.lastCloud = Date.now();
+    writeSave(true);
+  }
+  return res.ok;
+}
+
+function scheduleCloudPush() {
+  if (!Online.user || pendingCloud) return;
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(cloudPush, 4000);
+}
+
+function cloudChoice(useCloud) {
+  if (useCloud && pendingCloud) {
+    replaceSave(pendingCloud);
+    writeSave(true);
+    UI.applySettings();
+    UI.toast('Cloud progress loaded');
+  }
+  pendingCloud = null;
+  cloudPush();
+  UI.rerender();
+}
+
+async function onAuthChange(user) {
+  UI.rerender();
+  if (!user) return;
+  UI.retryInvite();
+  const cloud = await Online.loadSave();
+  const data = cloud && unpackSave(cloud.data);
+  if (!data || typeof data.gold !== 'number') {
+    cloudPush();
+    return;
+  }
+  const local = progressScore(save), remote = progressScore(data);
+  if (save.stats.runs === 0 && save.rank <= 1) {
+    pendingCloud = data;
+    cloudChoice(true);
+  } else if (Math.abs(local - remote) < 1) {
+    cloudPush();
+  } else {
+    pendingCloud = data;
+    UI.modal(`<h2 class="title">Which progress?</h2><p class="sub">This device and your account have different progress.</p>
+      <button class="btn primary" data-act="cloud-use">Use my account: rank ${data.rank || 1}, ${fmtInt((data.stats && data.stats.runs) || 0)} runs</button>
+      <button class="btn" data-act="cloud-keep">Keep this device: rank ${save.rank}, ${fmtInt(save.stats.runs)} runs</button>
+      <p class="lead">The one you don't pick is replaced.</p>`);
+  }
+}
+
+async function refreshRaid() {
+  if (!Online.available) return;
+  const r = await Online.raid();
+  if (r) UI.setRaid(r);
+}
+
+// ---------- main loop ----------
 function frame(now) {
   requestAnimationFrame(frame);
   let dt = (now - lastFrame) / 1000;
@@ -57,8 +234,9 @@ function frame(now) {
   if (dt > 0.1) dt = 0.1;
   if (game) {
     game.frame(dt);
+    Coop.tick(dt);
     // A paused scene does not change, so draw it once and let the GPU rest.
-    if (game.running() || !game._still || game.banner) {
+    if (game.running() || !game._still || game.banner || game.role === 'client') {
       drawGame(game);
       game._still = !game.running();
     }
@@ -82,7 +260,7 @@ function autoQuality(dt) {
     if (++perf.slow >= 2) {
       View.cap = Math.max(1, View.cap - 0.5);
       save.quality = View.cap;
-      writeSave();
+      writeSave(true);
       resize();
       perf.slow = 0;
     }
@@ -95,8 +273,22 @@ function onHide() {
     const snap = game.snapshot();
     if (snap) { save.run = snap; writeSave(); }
   }
+  if (Online.user) cloudPush();
   Input.reset();
   Sound.suspend();
+}
+
+// Deterrents only: real protection is the server rejecting impossible results.
+function guardDevtools() {
+  if (DEV) return;
+  try {
+    console.log('%cStop!', 'font: 700 42px sans-serif; color: #ff3d8b');
+    console.log('%cThis is a developer tool. Scores, raids and duels are checked by the server, so edits here will not count.', 'font: 16px sans-serif');
+  } catch (e) { /* no console */ }
+  window.addEventListener('keydown', (e) => {
+    const k = e.key ? e.key.toLowerCase() : '';
+    if (e.key === 'F12' || ((e.ctrlKey || e.metaKey) && (e.shiftKey || e.altKey) && ['i', 'j', 'c'].includes(k)) || ((e.ctrlKey || e.metaKey) && k === 'u')) e.preventDefault();
+  });
 }
 
 function registerSW() {
@@ -104,7 +296,7 @@ function registerSW() {
   navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then((r) => { swReg = r; }).catch(() => {});
 }
 
-function boot(hot) {
+async function boot(hot) {
   parseDebug();
   loadSave();
   if (hot && hot.run && !save.run) save.run = hot.run;
@@ -112,8 +304,9 @@ function boot(hot) {
   Haptics.mount();
   setupCanvas(document.getElementById('game'));
   Input.attach(canvas);
-  UI.init({ startRun, exitToMenu, getGame: () => game });
+  UI.init({ startRun, exitToMenu, getGame: () => game, cloudPush, cloudChoice });
   UI.applySettings();
+  autoUnlockPilots();
   UI.showMenu();
 
   document.addEventListener('visibilitychange', () => {
@@ -121,6 +314,7 @@ function boot(hot) {
     else {
       lastFrame = performance.now();
       if (swReg) swReg.update().catch(() => {});
+      if (!game) { UI.maybeShowLogin(); refreshRaid(); }
     }
   });
   window.addEventListener('pagehide', onHide);
@@ -130,13 +324,32 @@ function boot(hot) {
   for (const t of ['pointerup', 'touchend', 'keydown']) window.addEventListener(t, () => Sound.unlock(), { capture: true, passive: true });
   document.addEventListener('gesturestart', (e) => e.preventDefault());
   document.addEventListener('dblclick', (e) => e.preventDefault());
-  window.addEventListener('contextmenu', (e) => e.preventDefault());
+  window.addEventListener('contextmenu', (e) => { if (!e.target.closest('input, textarea')) e.preventDefault(); });
 
   registerSW();
   lastFrame = performance.now();
   requestAnimationFrame(frame);
-  window.__ns = { get game() { return game; }, get save() { return save; }, startRun, DEBUG };
-  if (DEBUG.bot) startRun({ daily: false });
+  if (DEV) window.__ns = { get game() { return game; }, get save() { return save; }, startRun, DEBUG };
+  if (DEBUG.bot) startRun({ mode: 'normal' });
+  if (saveTampered) setTimeout(() => UI.toast('Your saved progress was changed outside the game, so it was reset.'), 800);
+  guardDevtools();
+
+  await Online.init();
+  Online.onRecovery(() => UI.showNewPassword());
+  onSaveWrite(scheduleCloudPush);
+  Online.onAuth(onAuthChange);
+  if (Online.user) onAuthChange(Online.user);
+  Online.watchOnline((n) => UI.setOnlineCount(n));
+  refreshRaid();
+  UI.rerender();
+  // Invite links look like ?join=ABCD; open the co-op room once online is ready.
+  try {
+    const join = new URLSearchParams(location.search).get('join');
+    if (join && /^[A-Z2-9]{4}$/i.test(join)) {
+      history.replaceState(null, '', location.pathname);
+      UI.openInvite(join.toUpperCase());
+    }
+  } catch (e) { /* ignore bad links */ }
 }
 
 const hotApi = window.claude && window.claude.hot;

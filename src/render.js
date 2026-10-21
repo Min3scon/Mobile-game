@@ -189,6 +189,24 @@ const SPRITES = {
     g.shadowBlur = 0; g.fillStyle = '#fff3e0';
     g.beginPath(); g.moveTo(6, 0); g.lineTo(-2, 2); g.lineTo(-2, -2); g.closePath(); g.fill();
   }),
+  glaive: (big) => spriteCustom('glaive' + big, big ? 20 : 15, (g) => {
+    const c = big ? '#e0fff0' : '#9effc9', r = big ? 11 : 8;
+    g.shadowColor = c; g.shadowBlur = 10 * SPR_SCALE;
+    g.fillStyle = rgba(c, 0.35); g.strokeStyle = c; g.lineWidth = 2;
+    g.beginPath();
+    for (let i = 0; i < 8; i++) {
+      const a = (i * Math.PI) / 4, rr = i % 2 ? r * 0.35 : r;
+      if (i) g.lineTo(Math.cos(a) * rr, Math.sin(a) * rr); else g.moveTo(rr, 0);
+    }
+    g.closePath(); g.fill(); g.stroke();
+    g.shadowBlur = 0; g.fillStyle = '#fff'; g.beginPath(); g.arc(0, 0, 1.8, 0, TAU); g.fill();
+  }),
+  mine: (evo) => spriteCustom('mine' + evo, 14, (g) => {
+    const c = evo ? '#fff3a0' : '#ffe066';
+    g.shadowColor = c; g.shadowBlur = 7 * SPR_SCALE;
+    g.strokeStyle = c; g.lineWidth = 2; g.fillStyle = 'rgba(40,30,0,0.7)';
+    poly(g, 6, 6.5, 0); g.fill(); g.stroke();
+  }),
   ebullet: () => spriteCustom('ebullet', 14, (g) => {
     g.fillStyle = 'rgba(20,0,20,0.9)';
     g.beginPath(); g.arc(0, 0, 7.5, 0, TAU); g.fill();
@@ -319,6 +337,12 @@ function drawGame(g) {
   ctx.globalAlpha = 0.12;
   drawSprite(spriteDot(g.char.color), p.x, p.y, 5);
   ctx.globalAlpha = 1;
+  for (const z of g.zones) {
+    if (!vis(z.x, z.y, z.r * 2)) continue;
+    ctx.globalAlpha = clamp(z.life / z.max, 0, 1) * 0.55;
+    drawSprite(spriteDot(z.color), z.x, z.y, (z.r / 16) * 1.5);
+  }
+  ctx.globalAlpha = 1;
   for (const f of g.fx) {
     if (f.kind !== 'nova') continue;
     const a = clamp(1 - f.r / f.maxR, 0, 1);
@@ -341,6 +365,15 @@ function drawGame(g) {
       drawSprite(SPRITES.chest(), k.x, k.y + bob, 1 + Math.sin(T * 6) * 0.06);
     } else {
       drawSprite(SPRITES[k.kind](), k.x, k.y + bob);
+    }
+  }
+
+  for (const m of g.mines) {
+    if (!vis(m.x, m.y, 14)) continue;
+    drawSprite(SPRITES.mine(m.evo ? 1 : 0), m.x, m.y);
+    if (m.arm <= 0 && Math.floor(T * 4 + m.id) % 2 === 0) {
+      ctx.fillStyle = '#ff4b5c';
+      ctx.beginPath(); ctx.arc(m.x, m.y, 1.8, 0, TAU); ctx.fill();
     }
   }
 
@@ -376,6 +409,11 @@ function drawGame(g) {
   worldTransform();
   for (const e of g.enemies) {
     if (e.dead || !vis(e.x, e.y, e.r * 2)) continue;
+    if (e.slowT > 0) {
+      ctx.strokeStyle = 'rgba(168,230,255,0.7)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(e.x, e.y, e.r + 3, 0, TAU); ctx.stroke();
+    }
     if (e.d.ai === 'shoot' && e.st < 0.45) {
       ctx.globalCompositeOperation = 'lighter';
       drawSprite(spriteDot('#ff2bd6'), e.x, e.y, 0.5 + (0.45 - e.st) * 2);
@@ -395,30 +433,71 @@ function drawGame(g) {
   for (const b of g.bullets) {
     if (!vis(b.x, b.y, 20)) continue;
     if (b.kind === 'missile') drawSpriteRot(SPRITES.missile(), b.x, b.y, b.ang);
+    else if (b.kind === 'glaive') drawSpriteRot(SPRITES.glaive(b.big ? 1 : 0), b.x, b.y, b.ang, b.r / (b.big ? 11 : 8) * 0.9);
     else drawSpriteRot(SPRITES.bolt(b.color, b.big), b.x, b.y, b.ang, b.size);
   }
   // blades
-  for (const w of g.weapons) {
-    if (w.id !== 'blades' || !w.pos) continue;
-    const col = w.evo ? '#e8ffb0' : '#b6ff3d';
-    const br = Math.round(w.br);
-    for (let i = 0; i < w.pos.length; i += 2) {
-      drawSpriteRot(spriteShape('diamond', br, col), w.pos[i], w.pos[i + 1], w.angle + (i / 2) * (TAU / (w.pos.length / 2)) + Math.PI / 2);
+  for (const sh of g.ships) {
+    if (sh.down) continue;
+    for (const w of sh.weapons) {
+      if (w.id !== 'blades' || !w.pos) continue;
+      const col = w.evo ? '#e8ffb0' : '#b6ff3d';
+      const br = Math.round(w.br);
+      for (let i = 0; i < w.pos.length; i += 2) {
+        if (w.pos[i] === undefined) continue;
+        drawSpriteRot(spriteShape('diamond', br, col), w.pos[i], w.pos[i + 1], w.angle + (i / 2) * (TAU / (w.pos.length / 2)) + Math.PI / 2);
+      }
+    }
+  }
+  // pets
+  for (const sh of g.ships) {
+    for (const pet of sh.pets) {
+      const d = PETS[pet.id];
+      if (!d || !vis(pet.x, pet.y, 12)) continue;
+      drawSpriteRot(spriteShape(d.shape, 5, d.color), pet.x, pet.y + Math.sin(T * 3 + pet.ang) * 2, T * 2 + pet.ang);
     }
   }
   ctx.globalCompositeOperation = 'source-over';
 
-  // player
-  if (g.state !== 'dead' && !(p.inv > 0 && Math.floor(T * 16) % 2 === 0 && g.state === 'play')) {
-    drawSpriteRot(spriteShape('ship', 11, g.char.color, 'player'), p.x, p.y, Math.atan2(p.fy, p.fx));
+  // ships: teammates first, you on top
+  const order = g.ships.filter((s) => s !== p).concat([p]);
+  for (const sh of order) {
+    if (!vis(sh.x, sh.y, 30)) continue;
+    if (sh.down) {
+      drawSpriteRot(spriteShape('ship', 11, '#5a5680'), sh.x, sh.y, Math.atan2(sh.fy, sh.fx));
+      continue;
+    }
+    if (g.state === 'dead' || (sh.inv > 0 && Math.floor(T * 16) % 2 === 0 && g.state === 'play')) continue;
+    drawSpriteRot(spriteShape('ship', 11, sh.char.color, 'player'), sh.x, sh.y, Math.atan2(sh.fy, sh.fx));
   }
   worldTransform();
-  if (g.state === 'play') {
-    const w = 30, frac = clamp(p.hp / g.stats.maxHp, 0, 1);
-    ctx.fillStyle = 'rgba(0,0,0,0.55)';
-    ctx.fillRect(p.x - w / 2 - 1, p.y + 19, w + 2, 5);
-    ctx.fillStyle = frac > 0.5 ? '#6dff9a' : frac > 0.25 ? '#ffd447' : '#ff4b5c';
-    ctx.fillRect(p.x - w / 2, p.y + 20, w * frac, 3);
+  for (const sh of order) {
+    if (!vis(sh.x, sh.y, 40)) continue;
+    if (sh.shield && !sh.down) {
+      ctx.strokeStyle = rgba('#7db8ff', 0.55 + 0.25 * Math.sin(T * 5));
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(sh.x, sh.y, 17, 0, TAU); ctx.stroke();
+    }
+    if (sh.down) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+      ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(sh.x, sh.y, 48, 0, TAU); ctx.stroke();
+      ctx.strokeStyle = '#6dff9a';
+      ctx.beginPath(); ctx.arc(sh.x, sh.y, 22, -Math.PI / 2, -Math.PI / 2 + TAU * clamp(sh.reviveT / 2.5, 0, 1)); ctx.stroke();
+    }
+    if (g.state === 'play' || g.role === 'client') {
+      const w = sh === p ? 30 : 24, frac = clamp(sh.hp / (sh.stats ? sh.stats.maxHp : sh.maxHp || 100), 0, 1);
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.fillRect(sh.x - w / 2 - 1, sh.y + 19, w + 2, 5);
+      ctx.fillStyle = frac > 0.5 ? '#6dff9a' : frac > 0.25 ? '#ffd447' : '#ff4b5c';
+      ctx.fillRect(sh.x - w / 2, sh.y + 20, w * frac, 3);
+    }
+    if (sh !== p) {
+      ctx.font = '700 10px ' + FONT;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = sh.char.color;
+      ctx.fillText(sh.name, sh.x, sh.y - 20);
+    }
   }
 
   // effects
@@ -493,7 +572,7 @@ function drawGame(g) {
 
   // screen space
   drawVignette(vignette);
-  const hpFrac = p.hp / g.stats.maxHp;
+  const hpFrac = p.down ? 0 : p.hp / g.stats.maxHp;
   if (g.state === 'play' && hpFrac < 0.3) drawVignette(hurtVignette, 0.45 + 0.35 * Math.sin(T * 6));
   if (p.hurtFlash > 0) drawVignette(hurtVignette, p.hurtFlash * 3);
   if (g.flash > 0) {
@@ -571,6 +650,16 @@ function drawHUD(g) {
   ctx.font = '700 27px ' + FONT;
   ctx.fillStyle = g.finalSpawned ? '#ffd447' : '#ffffff';
   ctx.fillText(g.finalSpawned ? 'BOSS' : fmtTime(g.t), W / 2, top + 38);
+  if (g.sector > 1 || g.mode === 'duel' || g.coop) {
+    ctx.font = '700 11px ' + FONT;
+    ctx.fillStyle = SECTORS[g.sector].color;
+    ctx.fillText((g.mode === 'duel' ? 'DUEL · ' : g.coop ? 'CO-OP · ' : '') + SECTORS[g.sector].name.toUpperCase(), W / 2, top + 54);
+  }
+  if (g.local.down && g.state === 'play') {
+    ctx.font = '700 16px ' + FONT;
+    ctx.fillStyle = '#ff4b5c';
+    ctx.fillText('YOU ARE DOWN · A TEAMMATE CAN REVIVE YOU', W / 2, View.cssH * 0.62);
+  }
   // boss bar
   if (g.boss && !g.boss.dead) {
     const b = g.boss, w = Math.min(320, W * 0.72), x = W / 2 - w / 2, y = top + 66;

@@ -1,0 +1,12 @@
+{
+  "name": "neon-swarm",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Neon Swarm, a survivors-style browser game for iPhone",
+  "scripts": {
+    "build": "node tools/build.mjs"
+  },
+  "devDependencies": {
+    "terser": "5.31.6"
+  }
+}
