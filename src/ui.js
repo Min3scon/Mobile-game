@@ -620,7 +620,7 @@ const UI = (() => {
     const gate = needOnline('Admin tools') || (status && status.admin ? '' : `<div class="empty">${icon('shield')}<b>Admins only</b></div>`);
     if (gate) { s.innerHTML = `<div class="wrap">${header('Admin', 'online')}${gate}</div>`; return; }
     if (adminSel) return renderAdminPlayer();
-    const t = tabs([['find', 'Players'], ['flagged', 'Flagged'], ['suspects', 'Suspects']], adminTab, 'admtab');
+    const t = tabs([['find', 'Players'], ['banned', 'Banned'], ['flagged', 'Flagged'], ['suspects', 'Suspects']], adminTab, 'admtab');
     const search = adminTab === 'find' ? `<form class="join-row" id="adm-form"><input id="adm-q" class="field" maxlength="16" autocomplete="off" autocapitalize="off" placeholder="Search players" value="${esc(adminQuery)}"><button class="btn sm primary" type="submit">${icon('search')}</button></form>` : '';
     s.innerHTML = `<div class="wrap">${header('Admin', 'online')}${t}${search}<div class="list" id="adm-list"><p class="lead">Loading…</p></div></div>`;
     const form = el('adm-form');
@@ -637,6 +637,12 @@ const UI = (() => {
         <small>${fmtTime(f.time_s)} · ${fmtInt(f.kills)} kills · LV ${f.level} · ${f.mode}${f.sector > 1 ? ' S' + f.sector : ''} · ${esc(f.flag_reason || '')}</small></div>
         <div class="r-act two-btn"><button class="btn sm" data-act="adm-review" data-id="${f.id}" data-ok="1">${icon('check')}</button><button class="btn sm danger" data-act="adm-review" data-id="${f.id}" data-ok="0">${icon('ban')}</button></div></div>`).join('')
         : '<p class="lead">Nothing to review.</p>';
+    } else if (tab === 'banned') {
+      list.innerHTML = rows.length ? rows.map((b) => `<div class="row toggle"><div class="r-main">
+        <b><button class="link" data-act="adm-open" data-id="${esc(b.user_id)}">${esc(b.username)}</button></b>
+        <small>${b.until ? 'Until ' + when(b.until) : 'Permanent'}${b.reason ? ' · ' + esc(b.reason) : ''} · by ${esc(b.by_name)}</small></div>
+        <div class="r-act"><button class="btn sm primary" data-act="adm-unban" data-id="${esc(b.user_id)}" data-name="${esc(b.username)}">Unban</button></div></div>`).join('')
+        : '<p class="lead">Nobody is banned right now.</p>';
     } else {
       list.innerHTML = rows.length ? rows.map(playerRow).join('') : `<p class="lead">${tab === 'suspects' ? 'No suspicious players.' : 'No players found.'}</p>`;
     }
@@ -1457,9 +1463,10 @@ const UI = (() => {
         return;
       }
       case 'adm-unban': {
-        const res = await Online.admin('unban', { p_user: adminSel });
-        toast(res.ok ? 'Ban lifted' : res.error);
-        if (res.ok) renderAdmin();
+        btn.disabled = true;
+        const res = await Online.admin('unban', { p_user: btn.dataset.id || adminSel });
+        toast(res.ok ? `${btn.dataset.name || 'Player'} is unbanned` : res.error);
+        renderAdmin();
         return;
       }
       case 'adm-wipe': {

@@ -12,7 +12,7 @@ const Online = (() => {
   const rid = () => Math.random().toString(36).slice(2, 10);
   const NAME_RE = /^[A-Za-z0-9_]{3,16}$/;
   const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  const ADMIN_RPCS = ['find', 'player', 'ban', 'unban', 'flagged', 'suspects', 'review', 'delete_scores'];
+  const ADMIN_RPCS = ['find', 'player', 'ban', 'unban', 'banned', 'flagged', 'suspects', 'review', 'delete_scores'];
   const banText = (b) => (b.until ? 'You are banned until ' + new Date(b.until).toISOString().slice(0, 16).replace('T', ' ') + ' UTC' : 'You are banned permanently') + (b.reason ? ': ' + b.reason : '');
 
   function setUser(u) {
@@ -499,6 +499,10 @@ const Online = (() => {
         if (name === 'unban') { for (const b of bans) if (b.uid === a.p_user && !b.lifted) b.lifted = new Date().toISOString(); write('bans', bans); return { ok: true, data: true }; }
         if (name === 'flagged') {
           return { ok: true, data: scores.filter((s) => s.flagged).reverse().map((s) => ({ id: s.id, user_id: s.uid, username: nameOf(s.uid) || 'Pilot', score: s.score, time_s: s.time, kills: s.kills, level: s.level, mode: s.mode, sector: s.sector, flag_reason: 'missing checkpoints' })) };
+        }
+        if (name === 'banned') {
+          const live = bans.filter((b) => !b.lifted && (!b.until || Date.parse(b.until) > Date.now())).reverse();
+          return { ok: true, data: live.map((b) => ({ user_id: b.uid, username: nameOf(b.uid) || 'No name', until: b.until, reason: b.reason, created_at: b.at, by_name: nameOf(b.by) || 'Admin' })) };
         }
         if (name === 'suspects') {
           return { ok: true, data: all.map((u) => player(u.id)).filter((p) => p.flagged + p.tamper > 0).sort((x, y) => (y.flagged + y.tamper) - (x.flagged + x.tamper)) };
