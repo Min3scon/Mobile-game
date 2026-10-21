@@ -1,11 +1,7 @@
-/* Neon Swarm service worker: network first so updates land, cache fallback so it plays offline. */
-const CACHE = 'neon-swarm-1.0.0';
-const ASSETS = [
-  './', 'index.html', 'style.css', 'manifest.webmanifest',
-  'src/util.js', 'src/audio.js', 'src/data.js', 'src/save.js', 'src/input.js',
-  'src/render.js', 'src/game.js', 'src/ui.js', 'src/main.js',
-  'icons/apple-touch-icon.png', 'icons/icon-192.png', 'icons/icon-512.png',
-];
+/* Neon Swarm service worker (template; tools/build.mjs fills in the cache name and file list).
+   Network first so updates land, cache fallback so it plays offline. */
+const CACHE = '__CACHE__';
+const ASSETS = __ASSETS__;
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)));
