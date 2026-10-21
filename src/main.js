@@ -7,7 +7,7 @@ if (typeof Online === 'undefined') {
   window.Online = {
     init: async () => {}, mode: 'off', available: false, user: null, onAuth: () => () => {}, onRecovery: () => {}, startRun: off, updatePassword: off, deleteAccount: off, status: 'failed: online.js did not load',
     signUp: off, signIn: off, signOut: off, resetPassword: off, setUsername: off, loadSave: async () => null, pushSave: off,
-    checkpoint: off, reportRun: off, myStatus: async () => null, admin: off,
+    checkpoint: off, reportRun: off, myStatus: async () => null, admin: off, league: async () => null, leagueClaim: off,
     submitScore: off, leaderboard: async () => [], myBest: async () => null, raid: async () => null, raidHit: off, raidClaim: off,
     duelCreate: off, duelGet: async () => null, duelSubmit: off, myDuels: async () => [], watchOnline: () => () => {}, room: null,
   };
@@ -38,6 +38,7 @@ function localMeta(charId) {
     shop: Object.assign({}, save.shop),
     mastery: masteryLevel(charId),
     pets: equippedPets(),
+    trail: save.trails[save.trail] ? save.trail : '',
   };
 }
 
@@ -82,7 +83,9 @@ async function startRun(opts) {
     mode, resume, sector, seed,
     ships: [{ id: 'me', name: myName(), charId, meta: localMeta(charId) }],
     localId: 'me',
-    hooks: { levelUp: UI.showLevelUp, chest: UI.showChest, over: onRunOver },
+    // Protocols open up after the first run, so the first one stays simple.
+    protocols: save.stats.runs >= 1 ? unlockedProtocols() : [],
+    hooks: { levelUp: UI.showLevelUp, chest: UI.showChest, protocol: UI.showProtocol, over: onRunOver },
   });
   game.duelCode = opts.duelCode || null;
   game.runId = runId;
@@ -338,6 +341,16 @@ async function connectOnline() {
   return Online.available;
 }
 
+// Runs once the server's time is known: start the drone patrol and greet returning players.
+function onClockSync() {
+  if (!Clock.synced) return;
+  startPatrol();
+  const back = checkComeback();
+  if (game) return;
+  if (back) UI.showComeback(back);
+  UI.rerender();
+}
+
 function registerSW() {
   if (window.NS_EMBEDDED || !('serviceWorker' in navigator) || location.protocol !== 'https:') return;
   navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then((r) => { swReg = r; }).catch(() => {});
@@ -361,7 +374,7 @@ async function boot(hot) {
     else {
       lastFrame = performance.now();
       if (swReg) swReg.update().catch(() => {});
-      Updater.check();
+      Updater.check().then(onClockSync);
       if (!game) { UI.maybeShowLogin(); refreshRaid(); refreshStatus(); }
     }
   });
@@ -375,7 +388,7 @@ async function boot(hot) {
   window.addEventListener('contextmenu', (e) => { if (!e.target.closest('input, textarea')) e.preventDefault(); });
 
   registerSW();
-  Updater.init({ busy: () => !!game, running: () => !!(game && !game.finished) });
+  Updater.init({ busy: () => !!game, running: () => !!(game && !game.finished) }).then(onClockSync);
   lastFrame = performance.now();
   requestAnimationFrame(frame);
   if (DEV) window.__ns = { get game() { return game; }, get save() { return save; }, startRun, DEBUG };
