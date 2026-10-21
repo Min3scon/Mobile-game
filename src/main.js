@@ -5,7 +5,7 @@ if (typeof Online === 'undefined') {
   // online.js missing: behave as a fully offline game.
   const off = async () => ({ ok: false, error: 'Online features are not available' });
   window.Online = {
-    init: async () => {}, mode: 'off', available: false, user: null, onAuth: () => () => {}, onRecovery: () => {}, startRun: off, updatePassword: off, deleteAccount: off,
+    init: async () => {}, mode: 'off', available: false, user: null, onAuth: () => () => {}, onRecovery: () => {}, startRun: off, updatePassword: off, deleteAccount: off, status: 'failed: online.js did not load',
     signUp: off, signIn: off, signOut: off, resetPassword: off, setUsername: off, loadSave: async () => null, pushSave: off,
     submitScore: off, leaderboard: async () => [], myBest: async () => null, raid: async () => null, raidHit: off, raidClaim: off,
     duelCreate: off, duelGet: async () => null, duelSubmit: off, myDuels: async () => [], watchOnline: () => () => {}, room: null,
@@ -291,6 +291,24 @@ function guardDevtools() {
   });
 }
 
+let onlineWired = false;
+
+// Connects to the server and hooks up accounts, cloud save and presence. Safe to call again to retry.
+async function connectOnline() {
+  await Online.init();
+  if (Online.available && !onlineWired) {
+    onlineWired = true;
+    Online.onRecovery(() => UI.showNewPassword());
+    onSaveWrite(scheduleCloudPush);
+    Online.onAuth(onAuthChange);
+    if (Online.user) onAuthChange(Online.user);
+    Online.watchOnline((n) => UI.setOnlineCount(n));
+    refreshRaid();
+  }
+  UI.rerender();
+  return Online.available;
+}
+
 function registerSW() {
   if (window.NS_EMBEDDED || !('serviceWorker' in navigator) || location.protocol !== 'https:') return;
   navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then((r) => { swReg = r; }).catch(() => {});
@@ -304,7 +322,7 @@ async function boot(hot) {
   Haptics.mount();
   setupCanvas(document.getElementById('game'));
   Input.attach(canvas);
-  UI.init({ startRun, exitToMenu, getGame: () => game, cloudPush, cloudChoice });
+  UI.init({ startRun, exitToMenu, getGame: () => game, cloudPush, cloudChoice, connectOnline });
   UI.applySettings();
   autoUnlockPilots();
   UI.showMenu();
@@ -334,14 +352,7 @@ async function boot(hot) {
   if (saveTampered) setTimeout(() => UI.toast('Your saved progress was changed outside the game, so it was reset.'), 800);
   guardDevtools();
 
-  await Online.init();
-  Online.onRecovery(() => UI.showNewPassword());
-  onSaveWrite(scheduleCloudPush);
-  Online.onAuth(onAuthChange);
-  if (Online.user) onAuthChange(Online.user);
-  Online.watchOnline((n) => UI.setOnlineCount(n));
-  refreshRaid();
-  UI.rerender();
+  await connectOnline();
   // Invite links look like ?join=ABCD; open the co-op room once online is ready.
   try {
     const join = new URLSearchParams(location.search).get('join');

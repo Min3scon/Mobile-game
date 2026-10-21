@@ -6,7 +6,7 @@
 const Online = (() => {
   const TIMEOUT = 8000;
   const authCbs = [], recoveryCbs = [];
-  let mode = 'off', user = null, drv = null;
+  let mode = 'off', user = null, drv = null, status = 'no-config';
 
   const utcDay = () => new Date().toISOString().slice(0, 10);
   const rid = () => Math.random().toString(36).slice(2, 10);
@@ -513,9 +513,12 @@ const Online = (() => {
     get mode() { return mode; },
     get available() { return mode !== 'off'; },
     get user() { return user; },
+    // Why online is off: 'no-config' (keys missing) or 'failed: <reason>' (could not connect).
+    get status() { return status; },
     onAuth(cb) { authCbs.push(cb); return () => authCbs.splice(authCbs.indexOf(cb), 1); },
     onRecovery(cb) { recoveryCbs.push(cb); },
     async init() {
+      if (drv) return;
       const cfg = window.NS_CONFIG || {};
       let q;
       try { q = new URLSearchParams(location.search); } catch (e) { q = new URLSearchParams(); }
@@ -523,11 +526,12 @@ const Online = (() => {
       try {
         if (local && q.get('backend') === 'mock') { drv = mockDriver(); mode = 'mock'; }
         else if (cfg.supabaseUrl && cfg.supabaseKey) { drv = supabaseDriver(cfg); mode = 'supabase'; }
-        if (drv) await drv.init();
+        if (drv) { await drv.init(); status = 'ok'; }
       } catch (e) {
         // Server unreachable or library failed to load: keep playing offline.
         mode = 'off';
         drv = null;
+        status = 'failed: ' + ((e && e.message) || 'could not load the online library');
       }
     },
     room(code, info) { return drv ? drv.room(code, info) : null; },

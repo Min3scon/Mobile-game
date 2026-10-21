@@ -77,8 +77,12 @@ const UI = (() => {
   }
 
   function needOnline(what) {
+    if (!Online.available && Online.status === 'no-config') {
+      return `<div class="empty">${icon('globe')}<b>Online features are not connected yet</b><p>${what} needs the game's online server. Whoever runs this game can connect it by following <code>supabase/SETUP.md</code> in the project.</p></div>`;
+    }
     if (!Online.available) {
-      return `<div class="empty">${icon('globe')}<b>Online features are not connected yet</b><p>${what} needs the game's online server. Whoever runs this game can connect it by following <code>supabase/SETUP.md</code> in the project. If it is connected, check your internet.</p></div>`;
+      return `<div class="empty">${icon('globe')}<b>Can't reach the online server</b><p>Check your internet connection, then try again. You can keep playing offline meanwhile.</p>
+        <button class="btn primary" data-act="online-retry">Try again</button><small class="why">${esc(Online.status)}</small></div>`;
     }
     if (!Online.user) {
       return `<div class="empty">${icon('user')}<b>Log in to ${what.toLowerCase()}</b><p>Make a free account with your email. Your progress is saved to the cloud too.</p><button class="btn primary" data-act="go" data-to="account">Log in or sign up</button></div>`;
@@ -867,6 +871,14 @@ const UI = (() => {
       case 'qtab': questTab = btn.dataset.tab; renderQuests(); el('scr-quests').scrollTop = 0; break;
       case 'htab': hangarTab = btn.dataset.tab; renderHangar(); el('scr-hangar').scrollTop = 0; break;
       case 'daily-info': showDailyInfo(); break;
+      case 'online-retry': {
+        btn.disabled = true;
+        btn.textContent = 'Connecting…';
+        const ok = await api.connectOnline();
+        toast(ok ? 'Connected' : "Still can't connect");
+        rerender();
+        break;
+      }
       case 'lb-daily': closeModal(); lbBoard = 'daily'; go('board'); break;
       case 'set-pass': {
         const res = await Online.updatePassword(el('f-newpass').value);

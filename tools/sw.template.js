@@ -35,7 +35,8 @@ self.addEventListener('fetch', (e) => {
     return;
   }
   e.respondWith(
-    Promise.race([fetch(req), timeout(4000)])
+    // no-cache revalidates with the server, so a fresh deploy shows up on the next open.
+    Promise.race([fetch(req, { cache: 'no-cache' }), timeout(4000)])
       .then((res) => {
         if (res && res.ok) {
           const copy = res.clone();
