@@ -48,9 +48,9 @@ const Updater = (() => {
         const q = new URLSearchParams(location.search);
         if (q.has('v')) { q.delete('v'); history.replaceState(null, '', location.pathname + (q.toString() ? '?' + q : '')); }
       } catch (e) { /* ignore */ }
-      check();
       clearInterval(timer);
       timer = setInterval(check, EVERY);
+      return check();
     },
     check,
     // The clock could be changed while the app is in the background, so re-learn it on return.

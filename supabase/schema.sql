@@ -150,6 +150,30 @@ create table if not exists public.bans (
 );
 create index if not exists bans_user on public.bans (user_id);
 
+-- Weekly leagues: groups of up to 20 in the same tier; points come from posted scores.
+alter table public.profiles add column if not exists league_tier int not null default 1;
+create table if not exists public.league_members (
+  week date not null,
+  user_id uuid not null references auth.users on delete cascade,
+  tier int not null,
+  grp int not null,
+  pts int not null default 0,
+  runs int not null default 0,
+  primary key (week, user_id)
+);
+create index if not exists league_members_group on public.league_members (week, tier, grp);
+create table if not exists public.league_results (
+  week date not null,
+  user_id uuid not null references auth.users on delete cascade,
+  tier_from int not null,
+  tier_to int not null,
+  rank int not null,
+  size int not null,
+  gems int not null,
+  claimed boolean not null default false,
+  primary key (week, user_id)
+);
+
 create table if not exists private.admins (
   user_id uuid primary key references auth.users on delete cascade,
   created_at timestamptz not null default now()
@@ -166,12 +190,14 @@ alter table public.raid_hits enable row level security;
 alter table public.duels enable row level security;
 alter table public.run_checkpoints enable row level security;
 alter table public.bans enable row level security;
+alter table public.league_members enable row level security;
+alter table public.league_results enable row level security;
 
 drop policy if exists "own profile read" on public.profiles;
 create policy "own profile read" on public.profiles for select using (auth.uid() = id);
 drop policy if exists "own profile save" on public.profiles;
 
-revoke all on public.profiles, public.runs, public.scores, public.raids, public.raid_hits, public.duels, public.run_checkpoints, public.bans from anon, authenticated;
+revoke all on public.profiles, public.runs, public.scores, public.raids, public.raid_hits, public.duels, public.run_checkpoints, public.bans, public.league_members, public.league_results from anon, authenticated;
 grant select (id, username, save_updated_at) on public.profiles to authenticated;
 
 -- ---------- helpers ----------
@@ -376,6 +402,81 @@ begin
   return true;
 end $$;
 
+-- ---------- weekly leagues ----------
+create or replace function public.ns_week(t timestamptz default now()) returns date
+language sql stable as $$ select date_trunc('week', t at time zone 'utc')::date $$;
+
+-- Settles every finished week the player took part in: rank in their group, promotion or demotion,
+-- and a gem reward to claim. Runs lazily, so no scheduled job is needed.
+create or replace function public.ns_league_settle(uid uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare wk date := public.ns_week(); m public.league_members; r int; n int; t int; gems int;
+begin
+  for m in select * from public.league_members lm where lm.user_id = uid and lm.week < wk
+      and not exists (select 1 from public.league_results x where x.week = lm.week and x.user_id = uid) order by lm.week loop
+    select count(*) into n from public.league_members where week = m.week and tier = m.tier and grp = m.grp;
+    select count(*) + 1 into r from public.league_members
+      where week = m.week and tier = m.tier and grp = m.grp and (pts > m.pts or (pts = m.pts and user_id < m.user_id));
+    t := m.tier;
+    if n >= 3 and r <= 5 and r <= ceil(n / 2.0) and m.tier < 7 then t := m.tier + 1;
+    elsif n >= 8 and r > n - 3 and m.tier > 1 then t := m.tier - 1;
+    end if;
+    gems := case when r = 1 then 60 when r = 2 then 45 when r = 3 then 35 when r <= 5 then 20 when r <= 10 then 10 else 5 end + (m.tier - 1) * 5;
+    insert into public.league_results (week, user_id, tier_from, tier_to, rank, size, gems)
+    values (m.week, uid, m.tier, t, r, n, gems) on conflict do nothing;
+    update public.profiles set league_tier = t where id = uid;
+  end loop;
+end $$;
+
+-- Points for a posted score. The first score of the week puts the player in a group of their tier.
+create or replace function public.ns_league_add(uid uuid, p_score int) returns void
+language plpgsql security definer set search_path = public as $$
+declare wk date := public.ns_week(); m public.league_members; t int; g int;
+begin
+  perform public.ns_league_settle(uid);
+  select * into m from public.league_members where week = wk and user_id = uid;
+  if not found then
+    select league_tier into t from public.profiles where id = uid;
+    t := coalesce(t, 1);
+    perform pg_advisory_xact_lock(hashtext('ns-league-' || wk || '-' || t));
+    select grp into g from public.league_members where week = wk and tier = t group by grp having count(*) < 20 order by grp limit 1;
+    if g is null then select coalesce(max(grp), 0) + 1 into g from public.league_members where week = wk and tier = t; end if;
+    insert into public.league_members (week, user_id, tier, grp) values (wk, uid, t, g) returning * into m;
+  end if;
+  -- Square-rooted scores reward skill over hours played; at most 60 runs a week count.
+  if m.runs < 60 then
+    update public.league_members set pts = pts + floor(sqrt(greatest(p_score, 0)))::int, runs = runs + 1 where week = wk and user_id = uid;
+  end if;
+end $$;
+
+create or replace function public.league_status() returns json
+language plpgsql security definer set search_path = public as $$
+declare uid uuid := public.ns_me(); wk date := public.ns_week(); m public.league_members; t int; last public.league_results;
+begin
+  perform public.ns_league_settle(uid);
+  select * into m from public.league_members where week = wk and user_id = uid;
+  select league_tier into t from public.profiles where id = uid;
+  select * into last from public.league_results where user_id = uid and not claimed order by week desc limit 1;
+  return json_build_object(
+    'week', wk, 'ends', (wk + 7)::timestamp at time zone 'utc', 'tier', coalesce(m.tier, t, 1), 'joined', m.user_id is not null, 'pts', coalesce(m.pts, 0),
+    'group', case when m.user_id is null then '[]'::json else coalesce((select json_agg(x) from (
+        select coalesce(p.username, 'Pilot') as username, lm.pts, lm.user_id = uid as me
+        from public.league_members lm left join public.profiles p on p.id = lm.user_id
+        where lm.week = wk and lm.tier = m.tier and lm.grp = m.grp and (public.ns_active_ban(lm.user_id)).id is null
+        order by lm.pts desc, lm.user_id) x), '[]'::json) end,
+    'result', case when last.user_id is null then null else json_build_object('week', last.week, 'from', last.tier_from, 'to', last.tier_to,
+      'rank', last.rank, 'size', last.size, 'gems', last.gems) end);
+end $$;
+
+create or replace function public.league_claim(p_week date) returns int
+language plpgsql security definer set search_path = public as $$
+declare uid uuid := public.ns_play(); g int;
+begin
+  update public.league_results set claimed = true where week = p_week and user_id = uid and not claimed returning gems into g;
+  if g is null then raise exception 'Nothing to claim'; end if;
+  return g;
+end $$;
+
 -- The game reports runs that failed its own checks (edited values, sped-up clock, developer tools).
 -- The run can no longer be posted, and admins see the report on the player's page.
 create or replace function public.report_run(p_run uuid, p_reason text) returns boolean
@@ -436,6 +537,7 @@ begin
   insert into public.scores (user_id, run_id, score, time_s, kills, level, pilot, won, sector, mode, day, flagged, flag_reason)
   values (uid, r.id, p_score, p_time, p_kills, p_level, left(p_pilot, 16), p_won, r.sector, r.mode, r.day, why is not null, why);
   update public.runs set used_score = true where id = r.id;
+  if why is null then perform public.ns_league_add(uid, p_score); end if;
   select count(*) into better from (
     select user_id, max(score) as best from public.scores
     where mode = r.mode and (r.mode <> 'daily' or day = r.day) and user_id <> uid and not flagged
@@ -746,9 +848,12 @@ end $$;
 -- Approve a flagged score (shows on the leaderboard) or remove it.
 create or replace function public.admin_review(p_score bigint, p_ok boolean) returns boolean
 language plpgsql security definer set search_path = public as $$
+declare sc public.scores;
 begin
   perform public.ns_admin();
-  if p_ok then update public.scores set flagged = false, flag_reason = 'approved' where id = p_score;
+  if p_ok then
+    update public.scores set flagged = false, flag_reason = 'approved' where id = p_score and flagged returning * into sc;
+    if sc.id is not null and public.ns_week(sc.created_at) = public.ns_week() then perform public.ns_league_add(sc.user_id, sc.score); end if;
   else delete from public.scores where id = p_score;
   end if;
   return true;
@@ -782,6 +887,7 @@ grant execute on function public.username_available(text), public.leaderboard(te
 grant execute on function
   public.save_put(jsonb), public.save_get(), public.delete_account(), public.my_status(),
   public.run_checkpoint(uuid, int, int, int, int), public.report_run(uuid, text), public.admin_suspects(),
+  public.league_status(), public.league_claim(date),
   public.admin_find(text), public.admin_player(uuid), public.admin_ban(uuid, int, text), public.admin_unban(uuid),
   public.admin_flagged(), public.admin_review(bigint, boolean), public.admin_delete_scores(uuid),
   public.claim_username(text), public.start_run(text, int, bigint),

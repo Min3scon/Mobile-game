@@ -8,6 +8,10 @@ function grant(r, why) {
   if (r.gems) { save.gems += r.gems; got.push(`${fmtInt(r.gems)} gems`); }
   if (r.egg) { save.eggs[r.egg] = (save.eggs[r.egg] || 0) + 1; got.push(EGGS[r.egg].name); }
   if (r.pilot && !save.chars[r.pilot]) { save.chars[r.pilot] = true; got.push(`Pilot ${CHARS[r.pilot].name}`); }
+  if (r.trail && TRAILS[r.trail]) {
+    if (!save.trails[r.trail]) { save.trails[r.trail] = true; got.push(`${TRAILS[r.trail].name} trail`); }
+    else { save.gems += 25; got.push('25 gems (trail already owned)'); }
+  }
   if (r.unlock) got.push(r.unlock);
   return got;
 }
@@ -19,6 +23,7 @@ function rewardText(r) {
   if (r.gems) p.push(`${fmtInt(r.gems)} gems`);
   if (r.egg) p.push(EGGS[r.egg].name);
   if (r.pilot) p.push(`Pilot: ${CHARS[r.pilot].name}`);
+  if (r.trail && TRAILS[r.trail]) p.push(`${TRAILS[r.trail].name} trail`);
   if (r.unlock) p.push(r.unlock);
   return p.join(' + ');
 }
@@ -247,6 +252,7 @@ function claimDaily(id) {
   q.claimed = true;
   save.stats.dqDone++;
   const got = grant(DAILY_REWARD);
+  got.push(`${addPassXp(PASS_XP.dailyQuest).xp} Pass XP`);
   writeSave();
   return got;
 }
@@ -255,6 +261,7 @@ function claimDailyBonus() {
   if (save.dq.bonus || !save.dq.list.every((q) => q.claimed)) return null;
   save.dq.bonus = true;
   const got = grant(DAILY_BONUS);
+  got.push(`${addPassXp(PASS_XP.dailyBonus).xp} Pass XP`);
   writeSave();
   return got;
 }
@@ -284,9 +291,33 @@ function claimQuest(id) {
 
 // ---------- run results ----------
 // Applies a finished run to the account and returns a summary for the results screen.
+// ---------- protocols ----------
+function protocolUnlocked(id) {
+  return !!PROTOCOLS[id] && (!PROTOCOLS[id].unlock || !!save.protocols[id]);
+}
+
+function unlockedProtocols() {
+  return Object.keys(PROTOCOLS).filter(protocolUnlocked);
+}
+
+function checkProtocolUnlocks(r) {
+  const out = [];
+  for (const id in PROTOCOLS) {
+    const u = PROTOCOLS[id].unlock;
+    let hit = false;
+    try { hit = !!(u && !save.protocols[id] && u.test(r)); } catch (e) { hit = false; }
+    if (hit) {
+      save.protocols[id] = true;
+      out.push(id);
+    }
+  }
+  return out;
+}
+
 function applyRunResult(r, extra = {}) {
   const S = save.stats;
   const out = { gold: r.gold, gems: 0, dailyBonus: 0, rankXp: 0, ranks: [], newPilots: [], newBest: false, sectorUnlocked: 0, masteryUp: 0 };
+  out.newProtocols = r.passives && r.weapons ? checkProtocolUnlocks(r) : [];
   if (r.daily) {
     out.dailyBonus = Math.round(r.gold * (0.5 + 0.1 * Math.min(5, Math.max(0, save.daily.streak - 1))));
     out.gold += out.dailyBonus;
@@ -331,6 +362,13 @@ function applyRunResult(r, extra = {}) {
     level: r.level, gold: out.gold, dailyRuns: r.daily ? 1 : 0, coopRuns: r.coop ? 1 : 0, duels: r.mode === 'duel' ? 1 : 0,
     raidDmg: extra.raidDmg || 0, noHit: r.bestNoHit,
   });
+  trackWeekly({
+    kills: r.kills, chests: r.chests, beacons: r.beacons || 0, time: r.time, evolutions: r.evolutions, wardens: r.wardens,
+    elites: r.elites, dailyRuns: r.daily ? 1 : 0, level: r.level, wins: r.won ? 1 : 0, gold: out.gold,
+  }, r.charId);
+  // Streak and Neon Pass
+  out.streak = r.time >= STREAK_MIN_TIME ? tickStreak() : null;
+  out.pass = addPassXp(PASS_XP.run + Math.floor(r.time / 30) * PASS_XP.perHalfMinute + (out.streak && out.streak.first ? PASS_XP.firstRunOfDay : 0), true);
   save.run = null;
   save.seenTutorial = true;
   writeSave();

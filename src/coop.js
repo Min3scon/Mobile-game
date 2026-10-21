@@ -131,7 +131,7 @@ const Coop = (() => {
     const shop = {};
     for (const it of SHOP) shop[it.id] = clamp((m && m.shop && +m.shop[it.id]) || 0, 0, it.max);
     const pets = ((m && m.pets) || []).filter((p) => PETS[p.id]).slice(0, 2).map((p) => ({ id: p.id, stars: clamp(+p.stars || 1, 1, PET_MAX_STARS) }));
-    return { shop, mastery: clamp((m && +m.mastery) || 1, 1, 10), pets };
+    return { shop, mastery: clamp((m && +m.mastery) || 1, 1, 10), pets, trail: m && TRAILS[m.trail] ? m.trail : '' };
   }
 
   function sendLevelUp(g, sh) {

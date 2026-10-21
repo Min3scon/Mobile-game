@@ -11,6 +11,7 @@ const UI = (() => {
   let lbBoard = 'all', questTab = 'daily', hangarTab = 'pilots', acctTab = 'login', busy = false;
   let lastResult = null, raidCache = null, onlineCount = 0, joinedDuel = null, pendingJoin = null;
   let status = null, banLine = '', adminTab = 'find', adminQuery = '', adminSel = null, confirmWipe = 0;
+  let banishMode = false, jackpot = null;
   const GEM = '#ff7ae0';
 
   const isStandalone = () => window.navigator.standalone === true || (window.matchMedia && matchMedia('(display-mode: standalone)').matches);
@@ -98,12 +99,43 @@ const UI = (() => {
     const pets = equippedPets();
     const rc = rankClaimable(), qc = questsClaimable() + dailyClaimable() + rc;
     const sec = clamp(save.sector || 1, 1, save.sectorMax);
+    const veteran = save.stats.runs >= 1, st = streakNow();
     const hint = isIOS && !isStandalone() && !inFrame
       ? `<p class="hint">${icon('up')} Tap <b>Share</b> then <b>Add to Home Screen</b> to play fullscreen.</p>` : '';
+    // New players see just Play; the rest opens up over their first runs.
+    const tile = (id, ic, label, badge, attrs) => (featureOpen(id) ? `<button class="tile ${id === 'daily' ? 'daily' : ''}" ${attrs}>${icon(ic)}<span>${label}</span>${featureNew(id) ? '<b class="badge new">NEW</b>' : badge ? `<b class="badge">${badge}</b>` : ''}</button>` : '');
+    const tiles = [
+      tile('hangar', 'ship', 'Hangar', save.eggs.basic + save.eggs.royal, 'data-act="go" data-to="hangar"'),
+      tile('quests', 'trophy', 'Quests', qc, 'data-act="go" data-to="quests"'),
+      tile('online', 'globe', 'Online', 0, 'data-act="go" data-to="online"'),
+      tile('daily', 'flame', 'Daily', 0, 'data-act="daily-info"'),
+    ].join('');
+    let pass = '', patrol = '', goal = '';
+    if (veteran) {
+      const tier = passTier(), pc = passClaimable(), wc = weeklyClaimable(), maxed = tier >= PASS_TIERS;
+      const into = save.pass.xp - tier * PASS_TIER_XP, days = Math.max(1, Math.ceil((seasonStart() + SEASON_DAYS * DAY_MS - Clock.now()) / DAY_MS));
+      pass = `<button class="pass-bar" data-act="go" data-to="pass">
+        <span class="pb-top"><b>${icon('star')} Neon Pass</b><span>Tier ${tier}/${PASS_TIERS}${passBoosted() ? ' · <em>2× XP</em>' : ''}</span></span>
+        <span class="prog"><i style="width:${maxed ? 100 : (into / PASS_TIER_XP) * 100}%"></i></span>
+        <small>${pc ? `${pc} reward${pc > 1 ? 's' : ''} ready to claim` : maxed ? 'Season complete!' : `${into} / ${PASS_TIER_XP} XP`} · ${days}d left</small>
+        ${pc + wc ? `<b class="badge">${pc + wc}</b>` : ''}</button>`;
+      if (patrolReady()) {
+        const l = patrolLoot();
+        patrol = `<button class="patrol-pill" data-act="patrol">${icon('ship')}<span>Your drones found <b>${fmtInt(l.gold)} gold</b>${l.gems ? ` and <b>${l.gems} gems</b>` : ''}</span><em>Collect</em></button>`;
+      }
+      const g = homeGoal();
+      if (g) {
+        const f = (n) => (g.time ? fmtTime(n) : fmtInt(n));
+        goal = `<button class="goal-line" data-act="go" data-to="${g.to}"><span><small>Next goal</small><b>${esc(g.text)}</b></span><span class="gl-prog"><span class="prog"><i style="width:${(g.v / g.goal) * 100}%"></i></span><small>${f(g.v)} / ${f(g.goal)}</small></span></button>`;
+      }
+    }
     el('scr-menu').innerHTML = `
       <div class="wrap menu">
         <header class="bar">
-          <button class="rank-pill" data-act="go" data-to="rank" aria-label="Rank ${save.rank}">${icon('medal')}<b>${save.rank}</b>${rc ? '<i class="ping"></i>' : ''}</button>
+          <span class="bar-left">
+            <button class="rank-pill" data-act="go" data-to="rank" aria-label="Rank ${save.rank}">${icon('medal')}<b>${save.rank}</b>${rc ? '<i class="ping"></i>' : ''}</button>
+            ${veteran ? `<button class="streak-chip ${st.today ? 'lit' : st.risk ? 'risk' : ''}" data-act="streak" aria-label="${st.cur} day streak">${icon('flame')}<b>${st.cur}</b>${streakClaimable() ? '<i class="ping"></i>' : ''}</button>` : ''}
+          </span>
           <span class="bar-right">${wallet()}<button class="icon-btn" data-act="go" data-to="settings" aria-label="Settings">${icon('gear')}</button></span>
         </header>
         ${status && status.ban ? `<p class="ban-note">${icon('ban')}<span>${esc(banLine)}. You can still play, but scores, raids and duels are off.</span></p>` : ''}
@@ -122,14 +154,94 @@ const UI = (() => {
           <b>${SECTORS[sec].name}</b>
           <button class="icon-btn flip" data-act="sector" data-d="1" aria-label="Harder sector" ${sec >= save.sectorMax ? 'disabled' : ''}>${icon('back')}</button>
         </div>` : ''}
-        <nav class="home-nav">
-          <button class="tile" data-act="go" data-to="hangar">${icon('ship')}<span>Hangar</span>${save.eggs.basic + save.eggs.royal ? `<b class="badge">${save.eggs.basic + save.eggs.royal}</b>` : ''}</button>
-          <button class="tile" data-act="go" data-to="quests">${icon('trophy')}<span>Quests</span>${qc ? `<b class="badge">${qc}</b>` : ''}</button>
-          <button class="tile" data-act="go" data-to="online">${icon('globe')}<span>Online</span></button>
-          <button class="tile daily" data-act="daily-info">${icon('flame')}<span>Daily</span></button>
-        </nav>
+        ${pass}${patrol}
+        ${tiles ? `<nav class="home-nav">${tiles}</nav>` : `<p class="hint">Drag anywhere to fly. Your weapons fire on their own.</p>`}
+        ${!veteran && Online.available && !Online.user ? `<p class="hint">Have an account? <button class="link" data-act="go" data-to="account">Log in</button></p>` : ''}
+        ${goal}
         ${hint}
       </div>`;
+  }
+
+  // ---------- streak ----------
+  function showStreak() {
+    const st = streakNow(), S = save.streak;
+    const ms = STREAK_MILESTONES.map((m) => {
+      const got = S.claimed[m.days], ready = S.best >= m.days && !got;
+      return `<div class="row quest ${got ? 'claimed' : ''}"><div class="r-main"><b>${m.days}-day streak</b><small>${rewardText(m.reward)}</small></div>
+        <div class="r-act">${got ? `<span class="chip on">${icon('check')}</span>` : ready ? `<button class="btn sm primary" data-act="claim-streak" data-days="${m.days}">Claim</button>` : `<span class="chip">${Math.min(S.best, m.days)}/${m.days}</span>`}</div></div>`;
+    }).join('');
+    const msg = st.today ? 'You played today. See you tomorrow!' : st.cur ? 'Play a run of at least 1 minute today to keep it going.' : 'Play a run of at least 1 minute each day to build a streak.';
+    const left = STREAK_EARN_BACK - S.back;
+    const back = S.lost ? `<p class="unlock">${icon('reroll')} Win back your ${S.lost}-day streak: play ${left} more run${left > 1 ? 's' : ''} within 3 days of losing it.</p>`
+      : st.ended ? `<p class="hint">Your ${st.ended}-day streak ended. Play 3 runs within 3 days to win it back.</p>` : '';
+    modal(`<div class="streak-hero ${st.today ? 'lit' : ''}">${icon('flame')}<b>${st.cur}</b><small>day streak</small></div>
+      <p class="sub">${msg}</p>${back}
+      <div class="row toggle"><div class="r-main"><b>${icon('shield')} ${S.freezes} streak freeze${S.freezes === 1 ? '' : 's'}</b><small>A freeze covers a missed day on its own. You get one back every 7 days (up to ${STREAK_FREEZES}).</small></div></div>
+      <h3 class="sec">Milestones <span>best ${S.best}</span></h3><div class="list">${ms}</div>
+      <button class="btn ghost" data-act="modal-close">Close</button>`);
+  }
+
+  // ---------- Neon Pass ----------
+  function renderPass() {
+    const tier = passTier(), claimed = save.pass.claimed, maxed = tier >= PASS_TIERS, into = save.pass.xp - tier * PASS_TIER_XP;
+    const days = Math.max(1, Math.ceil((seasonStart() + SEASON_DAYS * DAY_MS - Clock.now()) / DAY_MS));
+    const wd = Math.max(1, Math.ceil((weekEnds() - Clock.now()) / DAY_MS));
+    ensureWeekly();
+    const weekly = save.weekly.list.map((q) => {
+      const def = weeklyDef(q.id), v = weeklyProgress(q.id), done = v >= def.goal, f = (n) => (def.time ? fmtTime(n) : fmtInt(n));
+      const act = q.claimed ? `<span class="chip on">${icon('check')} Done</span>` : done ? `<button class="btn sm primary" data-act="claim-weekly" data-id="${q.id}">Claim</button>` : `<span class="chip">${icon('star')} ${PASS_XP.weekly}</span>`;
+      return `<div class="row quest ${q.claimed ? 'claimed' : ''}"><div class="r-main"><b>${weeklyText(def)}</b><span class="prog"><i style="width:${(v / def.goal) * 100}%"></i></span>
+        <small class="prog-t">${f(v)} / ${f(def.goal)} · ${PASS_XP.weekly} Pass XP + ${rewardText(WEEKLY_REWARD)}</small></div><div class="r-act">${act}</div></div>`;
+    }).join('');
+    const tiers = [];
+    for (let t = 1; t <= PASS_TIERS; t++) {
+      const r = passReward(t), got = t <= claimed, ready = t <= tier && !got;
+      const ic = r.trail ? 'ship' : r.egg ? 'egg' : r.gems ? 'gem' : 'gold';
+      tiers.push(`<div class="pass-tier ${got ? 'got' : ready ? 'ready' : t === tier + 1 ? 'next' : ''} ${r.trail || r.egg === 'royal' ? 'big' : ''}" id="pt-${t}">
+        <span class="pt-n">${t}</span><span class="pt-ic">${icon(ic)}</span><span class="pt-r">${rewardText(r)}</span>${got ? `<span class="pt-ok">${icon('check')}</span>` : ''}</div>`);
+    }
+    el('scr-pass').innerHTML = `<div class="wrap">${header('Neon Pass')}
+      <div class="pass-hero"><small>Season ${seasonIndex() + 1} · ends in ${days} day${days > 1 ? 's' : ''}</small>
+        <b>Tier ${tier}<span>/${PASS_TIERS}</span></b>
+        <span class="prog"><i style="width:${maxed ? 100 : (into / PASS_TIER_XP) * 100}%"></i></span>
+        <small>${maxed ? 'Every tier reached. New season soon!' : `${into} / ${PASS_TIER_XP} XP to tier ${tier + 1}`}${passBoosted() ? ' · <em>2× run XP</em>' : ''}</small>
+        ${tier > claimed ? `<button class="btn primary" data-act="claim-pass">Claim ${tier - claimed} reward${tier - claimed > 1 ? 's' : ''}</button>` : ''}
+      </div>
+      <p class="lead">It's free. Earn Pass XP from every run (more for longer ones), daily quests and weekly challenges. Each season brings new trails, and falling behind doubles your run XP.</p>
+      <h3 class="sec">Weekly challenges <span>new in ${wd}d</span></h3><div class="list">${weekly}</div>
+      <h3 class="sec">Rewards</h3><div class="pass-track">${tiers.join('')}</div></div>`;
+  }
+
+  // ---------- league ----------
+  async function renderLeague() {
+    const gate = needOnline('Leagues');
+    el('scr-league').innerHTML = `<div class="wrap">${header('League', 'online')}${gate || '<p class="lead">Loading…</p>'}</div>`;
+    if (gate) return;
+    const L = await Online.league();
+    if (current() !== 'scr-league') return;
+    if (!L) { el('scr-league').querySelector('.lead').textContent = 'Could not load your league. Check your connection.'; return; }
+    const lg = LEAGUES[L.tier] || LEAGUES[1], n = L.group.length;
+    const left = Math.max(0, Date.parse(L.ends) - Clock.now()), dd = Math.floor(left / DAY_MS), hh = Math.floor((left % DAY_MS) / 3600000);
+    const zone = (rank) => (n >= 3 && rank <= LEAGUE_PROMOTE && rank <= Math.ceil(n / 2) && L.tier < LEAGUES.length - 1 ? 'up' : n >= 8 && rank > n - LEAGUE_DEMOTE && L.tier > 1 ? 'down' : '');
+    const rows = L.group.map((g, i) => `<div class="lb ${g.me ? 'me' : ''} ${zone(i + 1)}"><span class="lb-rank">${i + 1}</span><span class="lb-name"><b>${esc(g.username)}</b></span><span class="lb-score">${fmtInt(g.pts)}</span></div>`).join('');
+    const r = L.result;
+    const result = r ? `<div class="league-result" style="--c:${(LEAGUES[r.to] || lg).color}"><b>Last week: #${r.rank} of ${r.size}</b>
+      <small>${r.to > r.from ? `Promoted to ${LEAGUES[r.to].name}!` : r.to < r.from ? `Moved down to ${LEAGUES[r.to].name}.` : `Staying in ${LEAGUES[r.to].name}.`}</small>
+      <button class="btn primary" data-act="league-claim" data-week="${r.week}">Claim ${r.gems} gems</button></div>` : '';
+    el('scr-league').innerHTML = `<div class="wrap">${header('League', 'online')}${result}
+      <div class="league-hero" style="--c:${lg.color}">${icon('trophy')}<b>${lg.name} League</b><small>Ends in ${dd}d ${hh}h</small>
+        <span class="league-ladder">${LEAGUES.slice(1).map((x, i) => `<i class="${i + 1 === L.tier ? 'on' : i + 1 < L.tier ? 'past' : ''}" style="--c:${x.color}"></i>`).join('')}</span></div>
+      <p class="lead">Every score you post earns league points (better runs earn more). At the end of the week the top ${LEAGUE_PROMOTE} move up and the bottom ${LEAGUE_DEMOTE} move down. Everyone gets gems.</p>
+      <div class="list">${rows || `<p class="lead">Post a score this week to join a group of up to 20 pilots.</p>`}</div>
+      ${L.joined ? '' : '<button class="btn primary big" data-act="play">Play a run</button>'}</div>`;
+  }
+
+  function onClockSyncUi() { if (Clock.synced) rerender(); }
+
+  function showComeback(c) {
+    modal(`<h2 class="title">Welcome back!</h2><p class="sub">You were away ${c.days} days. The swarm missed you.</p>
+      <p class="unlock">${icon('gem')} +${c.gems} gems</p><p class="unlock">${icon('star')} Double Pass XP for 3 days</p>
+      <button class="btn primary big" data-act="modal-close">Let's go</button>`, 500);
   }
 
   function showDailyInfo() {
@@ -247,14 +359,29 @@ const UI = (() => {
 
   function renderHangar() {
     const eggs = save.eggs.basic + save.eggs.royal;
-    const body = hangarTab === 'pets' ? petsBody() : hangarTab === 'shop' ? shopBody() : pilotsBody();
-    el('scr-hangar').innerHTML = `<div class="wrap">${header('Hangar')}${tabs([['pilots', 'Pilots'], ['pets', 'Pets', eggs], ['shop', 'Upgrades']], hangarTab, 'htab')}${body}</div>`;
+    const body = hangarTab === 'pets' ? petsBody() : hangarTab === 'shop' ? shopBody() : hangarTab === 'style' ? trailsBody() : pilotsBody();
+    el('scr-hangar').innerHTML = `<div class="wrap">${header('Hangar')}${tabs([['pilots', 'Pilots'], ['pets', 'Pets', eggs], ['shop', 'Upgrades'], ['style', 'Trails']], hangarTab, 'htab')}${body}</div>`;
+  }
+
+  function trailsBody() {
+    const how = (id) => {
+      const m = STREAK_MILESTONES.find((x) => x.reward.trail === id);
+      if (m) return `Reach a ${m.days}-day streak`;
+      return seasonTrails().includes(id) ? "This season's Neon Pass" : 'A future Neon Pass season';
+    };
+    const row = (id, name, colors, owned, sub) => `<div class="row toggle ${save.trail === id ? 'sel' : ''}" style="--c:${colors[0]}"><div class="r-main"><b>${name}</b>
+      <span class="trail-sw">${colors.map((c) => `<i style="background:${c}"></i>`).join('')}</span><small>${sub}</small></div>
+      <div class="r-act">${!owned ? `<span class="chip">${icon('lock')}</span>` : save.trail === id ? `<span class="chip on">${icon('check')} On</span>` : `<button class="btn sm" data-act="trail" data-id="${id}">Use</button>`}</div></div>`;
+    const c = CHARS[save.selChar] || CHARS.volt;
+    return `<p class="lead">Trails change the light your ship leaves behind. They're cosmetic only.</p><div class="list">
+      ${row('', 'Pilot color', [c.color], true, 'Matches your pilot')}
+      ${Object.entries(TRAILS).map(([id, t]) => row(id, t.name, t.colors, !!save.trails[id], save.trails[id] ? 'Unlocked' : how(id))).join('')}</div>`;
   }
 
   // ---------- quests ----------
   function renderQuests() {
     ensureDailyQuests();
-    const tabBar = tabs([['daily', 'Daily', dailyClaimable()], ['rank', 'Rank', rankClaimable()], ['ach', 'Awards', questsClaimable()], ['evo', 'Evolve']], questTab, 'qtab');
+    const tabBar = tabs([['daily', 'Daily', dailyClaimable()], ['rank', 'Rank', rankClaimable()], ['ach', 'Awards', questsClaimable()], ['evo', 'Evolve'], ['proto', 'Protocols']], questTab, 'qtab');
     let body = '';
     if (questTab === 'rank') {
       body = rankBody();
@@ -286,6 +413,14 @@ const UI = (() => {
           <span class="prog"><i style="width:${(v / q.goal) * 100}%"></i></span><small class="prog-t">${fmt(v)} / ${fmt(q.goal)}</small></div>
           <div class="r-act">${act}</div></div>`;
       }).join('')}</div>`;
+    } else if (questTab === 'proto') {
+      const list = Object.entries(PROTOCOLS).map(([id, d]) => {
+        const got = protocolUnlocked(id);
+        return `<div class="evo ${got ? 'found' : ''}" style="--c:${d.color}">
+          <div class="r-ic">${got ? icon(d.icon) : icon('lock')}</div><b>${got ? d.name : '???'}</b>
+          <small>${got ? d.desc : d.unlock.hint}</small></div>`;
+      }).join('');
+      body = `<p class="lead">Pick a protocol at the start of every run, and a second one after the second Warden. Each one changes the rules. ${unlockedProtocols().length} / ${Object.keys(PROTOCOLS).length} unlocked.</p><div class="evos">${list}</div>`;
     } else {
       const evos = Object.entries(WEAPONS).map(([id, w]) => {
         const found = !!save.codex[id], p = PASSIVES[w.evo.with];
@@ -293,7 +428,7 @@ const UI = (() => {
           <div class="r-ic">${icon(w.icon)}</div><b>${found ? w.evo.name : '???'}</b>
           <small>${found ? `${w.name} + ${p.name}` : `Max ${w.name} + ???`}</small></div>`;
       }).join('');
-      body = `<p class="lead">Max out a weapon while holding its paired passive, then open a chest. ${Object.keys(save.codex).length} / ${Object.keys(WEAPONS).length} found.</p><div class="evos">${evos}</div>`;
+      body = `<p class="lead">Max out a weapon while holding its paired passive, then open a chest. Evolutions only come from chests. ${Object.keys(save.codex).length} / ${Object.keys(WEAPONS).length} found.</p><div class="evos">${evos}</div>`;
     }
     el('scr-quests').innerHTML = `<div class="wrap">${header('Quests')}${tabBar}${body}</div>`;
   }
@@ -326,6 +461,7 @@ const UI = (() => {
         ${row('coop', 'users', 'Co-op', onlineCount > 1 ? `${onlineCount} pilots online · play with 2-4 friends` : 'Play with 2-4 friends in one arena')}
         ${row('duel', 'swords', 'Duels', 'Same seed as a friend. Higher score wins')}
         ${row('raid', 'boss', r ? esc(r.name) : 'Weekly raid', r ? (r.defeated ? 'Defeated! Claim your reward' : `${fmtInt(r.hp)} HP left`) : 'Everyone damages one giant boss', r && !r.defeated ? `<span class="bossbar"><i style="width:${(r.hp / r.maxHp) * 100}%"></i></span>` : '')}
+        ${row('league', 'trophy', 'League', 'Weekly groups of 20. The top 5 move up')}
         ${row('board', 'star', 'Leaderboard', 'All time, this week and today')}
         ${status && status.admin ? row('admin', 'shield', 'Admin', 'Players, bans and flagged scores') : ''}
       </div>
@@ -644,7 +780,7 @@ const UI = (() => {
     section._lock = setTimeout(() => section.classList.remove('locked'), ms);
   }
 
-  function showLevelUp(g, choices) {
+  function showLevelUp(g, choices, lock = 450) {
     levelChoices = choices;
     if (DEBUG.bot) {
       setTimeout(() => { g.choose(g.botChoose(g.local, choices)); show(null); }, 0);
@@ -654,11 +790,40 @@ const UI = (() => {
     s.innerHTML = `<div class="wrap level">
       <h2 class="title">Level up</h2>
       <p class="sub">Level ${g.level - g.pendingLevels + 1}${g.pendingLevels > 1 ? ` · ${g.pendingLevels - 1} more to pick` : ''}${g.coop ? ' · the team waits for everyone' : ''}</p>
-      <div class="cards">${choices.map((c, i) => choiceCard(c, g, i)).join('')}</div>
-      <button class="btn ghost" data-act="reroll" ${g.local.rerolls > 0 ? '' : 'disabled'}>${icon('reroll')} Reroll <span class="btn-sub">${g.local.rerolls} left</span></button>
+      ${banishMode ? '<p class="sub banish-tip">Tap a card to remove it from this run</p>' : ''}
+      <div class="cards ${banishMode ? 'banishing' : ''}">${choices.map((c, i) => choiceCard(c, g, i)).join('')}</div>
+      <div class="pick-tools">
+        <button class="btn ghost" data-act="reroll" ${g.local.rerolls > 0 ? '' : 'disabled'}>${icon('reroll')} Reroll <span class="btn-sub">${g.local.rerolls}</span></button>
+        ${g.coop ? '' : `<button class="btn ghost ${banishMode ? 'on' : ''}" data-act="banish-mode" ${g.local.banishes > 0 ? '' : 'disabled'}>${icon('ban')} Banish <span class="btn-sub">${g.local.banishes}</span></button>
+        <button class="btn ghost" data-act="skip">Skip <span class="btn-sub">+gold</span></button>`}
+      </div>
     </div>`;
     show('scr-level');
-    lockFor(s, 450);
+    if (lock) lockFor(s, lock);
+  }
+
+  // ---------- protocols ----------
+  function protoCard(id, i) {
+    const d = PROTOCOLS[id];
+    return `<button class="card proto" data-act="proto" data-id="${id}" style="--c:${d.color};--d:${i * 90}ms">
+      <span class="c-ic">${icon(d.icon)}</span>
+      <span class="c-main"><span class="c-top"><b>${d.name}</b><em>Protocol</em></span><span class="c-desc">${d.desc}</span></span></button>`;
+  }
+
+  function showProtocol(g, offers) {
+    if (DEBUG.bot) {
+      setTimeout(() => { g.chooseProtocol(offers[0]); show(null); }, 0);
+      return;
+    }
+    const s = el('scr-level'), owned = [...g.local.protos];
+    s.innerHTML = `<div class="wrap level">
+      <h2 class="title">${owned.length ? 'Second protocol' : 'Choose a protocol'}</h2>
+      <p class="sub">${owned.length ? 'The Warden dropped another one. It stacks with ' + PROTOCOLS[owned[0]].name + '.' : 'It changes the rules for this run.'}</p>
+      <div class="cards">${offers.map(protoCard).join('')}</div>
+      <p class="hint">Unlock more in Quests › Protocols</p>
+    </div>`;
+    show('scr-level');
+    lockFor(s, 500);
   }
 
   function showWaiting() {
@@ -666,31 +831,98 @@ const UI = (() => {
     show('scr-level');
   }
 
+  // Chests are the big moment: the box shakes, bursts open, and each reward spins in like a reel.
   function showChest(g, reward) {
     if (DEBUG.bot) {
       setTimeout(() => { g.closeChest(); show(null); }, 0);
       return;
     }
-    let body;
-    if (reward.evo) {
-      const w = WEAPONS[reward.evo];
-      body = `<div class="card gold static" style="--c:#ffd447"><span class="c-ic">${icon(w.icon)}</span>
-        <span class="c-main"><span class="c-top"><b>${w.evo.name}</b><em>Evolution</em></span><span class="c-desc">${w.evo.desc}</span></span></div>`;
-    } else if (reward.ups.length) {
-      body = reward.ups.map((c, i) => choiceCard(c, g, i).replace('<button', '<div').replace('</button>', '</div>').replace('class="card', 'class="card static')).join('');
-    } else {
-      body = `<p class="sub">Your build is complete.</p>`;
-    }
+    const evo = reward.evos && reward.evos.length ? reward.evos : reward.evo ? [reward.evo] : [];
+    const items = evo.map((id) => ({ evo: id })).concat(reward.ups.map((c) => ({ up: c })));
+    const n = reward.n || 1;
+    const beam = evo.length ? 'rainbow' : n >= 5 ? 'gold' : n >= 3 ? 'green' : 'blue';
+    const title = evo.length ? 'Evolution!' : n >= 5 ? 'Jackpot!' : n >= 3 ? 'Triple!' : 'Chest';
     const s = el('scr-chest');
-    s.innerHTML = `<div class="wrap chest">
+    s.innerHTML = `<div class="wrap chest jackpot" data-act="chest-skip">
+      <div class="jp-beam ${beam}"><div class="jp-rays"></div></div>
       <div class="chest-art">${icon('chest')}</div>
-      <h2 class="title">${reward.evo ? 'Evolution!' : 'Chest'}</h2>
-      <div class="cards reveal">${body}<p class="chest-gold">${icon('gold')} +${reward.gold} gold</p></div>
-      <button class="btn primary" data-act="chest-ok">Continue</button>
+      <h2 class="title jp-title">&nbsp;</h2>
+      <div class="cards jp-slots">${items.map((_, i) => `<div class="card static jp-slot" data-slot="${i}"><span class="c-ic"></span><span class="c-main"></span></div>`).join('') || '<p class="sub">Your build is complete.</p>'}</div>
+      <p class="chest-gold">${icon('gold')} +<b class="jp-gold">0</b> gold</p>
+      <button class="btn primary" data-act="chest-ok" hidden>Continue</button>
     </div>`;
     show('scr-chest');
-    lockFor(s, 1100);
-    if (reward.evo || reward.ups.length) Haptics.tap();
+    const timers = [];
+    const later = (ms, fn) => timers.push(setTimeout(fn, ms));
+    const reelIcons = Object.values(WEAPONS).map((w) => [w.icon, w.color]).concat(Object.values(PASSIVES).map((p) => [p.icon, p.color]));
+    const fill = (i) => {
+      const slot = s.querySelector(`[data-slot="${i}"]`), it = items[i];
+      if (!slot || slot.classList.contains('done')) return;
+      clearInterval(slot._spin);
+      const html = it.evo ? evoCardInner(it.evo) : choiceCard(it.up, g, i).replace(/^<button[^>]*>/, '').replace(/<\/button>\s*$/, '');
+      slot.innerHTML = html;
+      slot.style.setProperty('--c', it.evo ? '#ffd447' : cardColor(it.up));
+      slot.classList.add('done');
+      if (it.evo) slot.classList.add('gold');
+    };
+    const finish = () => {
+      if (!jackpot) return;
+      for (const t of timers) clearTimeout(t);
+      s.querySelector('.jackpot').classList.add('open');
+      s.querySelector('.jp-title').textContent = title;
+      items.forEach((_, i) => fill(i));
+      s.querySelector('.jp-gold').textContent = fmtInt(reward.gold);
+      const ok = s.querySelector('[data-act="chest-ok"]');
+      ok.hidden = false;
+      lockFor(ok.parentElement, 350);
+      jackpot = null;
+    };
+    jackpot = { finish };
+    later(700, () => {
+      s.querySelector('.jackpot').classList.add('open');
+      s.querySelector('.jp-title').textContent = title;
+      Sound.play.boom();
+      if (evo.length || n >= 5) Sound.play.victory();
+    });
+    items.forEach((it, i) => {
+      const at = 950 + i * 480;
+      later(at, () => {
+        const slot = s.querySelector(`[data-slot="${i}"]`);
+        if (!slot) return;
+        slot.classList.add('spin');
+        let k = 0;
+        slot._spin = setInterval(() => {
+          const [ic, c] = reelIcons[(k + i * 3) % reelIcons.length];
+          slot.querySelector('.c-ic').innerHTML = icon(ic);
+          slot.style.setProperty('--c', c);
+          Sound.play.gem(k % 12);
+          k++;
+        }, 75);
+      });
+      later(at + 620, () => { fill(i); if (it.evo) Sound.play.evolve(); else Sound.play.pick(); });
+    });
+    const goldAt = 950 + items.length * 480 + 300;
+    later(goldAt, () => {
+      const box = s.querySelector('.jp-gold'), t0 = performance.now();
+      const step = () => {
+        if (!jackpot) return;
+        const t = clamp((performance.now() - t0) / 600, 0, 1);
+        box.textContent = fmtInt(reward.gold * easeOutCubic(t));
+        if (t < 1) requestAnimationFrame(step);
+        else Sound.play.coin();
+      };
+      step();
+    });
+    later(goldAt + 700, finish);
+  }
+
+  function evoCardInner(id) {
+    const w = WEAPONS[id];
+    return `<span class="c-ic">${icon(w.icon)}</span><span class="c-main"><span class="c-top"><b>${w.evo.name}</b><em>Evolution</em></span><span class="c-desc">${w.evo.desc}</span></span>`;
+  }
+
+  function cardColor(c) {
+    return c.kind === 'weapon' ? WEAPONS[c.id].color : c.kind === 'passive' ? PASSIVES[c.id].color : '#ffd447';
   }
 
   function buildList(sh) {
@@ -742,12 +974,19 @@ const UI = (() => {
     const notes = [];
     if (sum.ranks.length) notes.push(`<p class="unlock">${icon('medal')} Rank ${save.rank}! <button class="link" data-act="go" data-to="rank">Claim rewards</button></p>`);
     if (sum.masteryUp) notes.push(`<p class="unlock">${icon('ship')} ${CHARS[r.charId].name} reached mastery ${sum.masteryUp}</p>`);
+    const sk = sum.streak;
+    if (sk && sk.restored) notes.push(`<p class="unlock">${icon('flame')} Streak restored: ${sk.restored} days!</p>`);
+    else if (sk && sk.lost) notes.push(`<p class="hint">${icon('flame')} Your ${sk.lost}-day streak ended. Play 2 more runs within 3 days to win it back.</p>`);
+    else if (sk && sk.first) notes.push(`<p class="unlock">${icon('flame')} ${sk.cur}-day streak${sk.froze ? ' (a freeze covered the missed day)' : ''}</p>`);
+    if (sum.pass) notes.push(`<p class="unlock">${icon('star')} +${sum.pass.xp} Pass XP${sum.pass.tiers ? ` · <b>Tier ${sum.pass.tier}!</b>` : ''}</p>`);
+    for (const id of sum.newProtocols || []) notes.push(`<p class="unlock" style="color:${PROTOCOLS[id].color}">${icon(PROTOCOLS[id].icon)} Protocol unlocked: <b>${PROTOCOLS[id].name}</b></p>`);
+    if (save.stats.runs === 1 && !r.coop) notes.push(`<p class="unlock">${icon('star')} Next run you pick a <b>protocol</b> that bends the rules</p>`);
     for (const id of sum.newPilots) notes.push(`<p class="unlock">${shipSvg(CHARS[id].color)} New pilot unlocked: <b>${CHARS[id].name}</b></p>`);
     if (sum.sectorUnlocked) notes.push(`<p class="unlock" style="color:${SECTORS[sum.sectorUnlocked].color}">${icon('sector')} ${SECTORS[sum.sectorUnlocked].name} unlocked</p>`);
     const qc = questsClaimable() + dailyClaimable();
     el('scr-over').innerHTML = `<div class="wrap over ${r.won ? 'won' : ''}">
       <h2 class="title big">${title}</h2>
-      ${sum.newBest ? '<p class="new-best">New best score</p>' : ''}
+      ${sum.newBest ? '<p class="new-best">New best score</p>' : !r.quit && save.stats.bestScore > r.score && save.stats.runs > 1 ? `<p class="best">${fmtInt(save.stats.bestScore - r.score)} points from your best</p>` : ''}
       <div class="stats">${rows.map(([ic, label, v, f], i) => `<div class="stat">${icon(ic)}<span>${label}</span><b data-count="${v}" data-fmt="${f}" data-delay="${i * 150}">0</b></div>`).join('')}</div>
       <div class="gold-earned">${icon('gold')}<b data-count="${sum.gold}" data-fmt="int" data-delay="650">0</b><span>gold${sum.dailyBonus ? ` (incl. ${sum.dailyBonus} daily bonus)` : ''}</span></div>
       <div class="rank-strip static"><b>Rank ${save.rank}</b><span class="prog"><i style="width:${save.rank >= RANK_CAP ? 100 : (save.rankXp / need) * 100}%"></i></span><small>+${fmtInt(sum.rankXp)} XP</small></div>
@@ -807,7 +1046,7 @@ const UI = (() => {
   }
 
   function maybeShowLogin() {
-    if (loginReady() && !api.getGame() && current() === 'scr-menu' && el('modal').hidden) showLogin();
+    if (save.stats.runs >= 1 && loginReady() && !api.getGame() && current() === 'scr-menu' && el('modal').hidden) showLogin();
   }
 
   // ---------- misc ----------
@@ -837,6 +1076,7 @@ const UI = (() => {
   const RENDER = {
     hangar: renderHangar, quests: renderQuests, online: renderOnline, board: renderBoard,
     account: renderAccount, raid: renderRaid, duel: renderDuel, coop: renderCoop, settings: renderSettings, admin: renderAdmin,
+    pass: renderPass, league: renderLeague,
   };
   // Old destinations now live as tabs inside the hub screens.
   const ALIAS = { pilots: ['hangar', 'pilots'], pets: ['hangar', 'pets'], shop: ['hangar', 'shop'], rank: ['quests', 'rank'] };
@@ -850,9 +1090,14 @@ const UI = (() => {
       else questTab = tab;
       to = hub;
     }
+    markSeen(to);
     show('scr-' + to);
     RENDER[to]();
     el('scr-' + to).scrollTop = 0;
+    if (to === 'pass') {
+      const cur = el('pt-' + Math.min(PASS_TIERS, Math.max(1, passTier())));
+      if (cur && passTier() > 4) cur.scrollIntoView({ block: 'center' });
+    }
     if (to === 'quests' && questTab === 'rank') {
       const cur = el('rank-' + Math.max(2, save.rank));
       if (cur) cur.scrollIntoView({ block: 'center' });
@@ -864,7 +1109,7 @@ const UI = (() => {
     if (!id) return;
     if (id === 'scr-menu') { renderMenu(); return; }
     const key = id.slice(4);
-    if (RENDER[key] && !['board', 'raid', 'duel', 'admin'].includes(key)) {
+    if (RENDER[key] && !['board', 'raid', 'duel', 'admin', 'league'].includes(key)) {
       const s = el(id), top = s.scrollTop;
       RENDER[key]();
       s.scrollTop = top;
@@ -955,7 +1200,32 @@ const UI = (() => {
       }
       case 'qtab': questTab = btn.dataset.tab; renderQuests(); el('scr-quests').scrollTop = 0; break;
       case 'htab': hangarTab = btn.dataset.tab; renderHangar(); el('scr-hangar').scrollTop = 0; break;
-      case 'daily-info': showDailyInfo(); break;
+      case 'daily-info': markSeen('daily'); showDailyInfo(); break;
+      case 'streak': showStreak(); break;
+      case 'claim-streak': case 'claim-pass': case 'claim-weekly': case 'patrol': {
+        if (act === 'patrol' && !Clock.synced) { toast('Checking the time with the server… try again in a moment.'); Updater.check().then(onClockSyncUi); return; }
+        const got = act === 'claim-streak' ? claimStreak(+btn.dataset.days) : act === 'claim-pass' ? claimPass() : act === 'claim-weekly' ? claimWeekly(btn.dataset.id) : claimPatrol();
+        if (!got) return;
+        Sound.play.coin();
+        Haptics.tap();
+        toast('+' + got.join(', '));
+        if (act === 'claim-streak') showStreak();
+        else rerender();
+        return;
+      }
+      case 'trail':
+        save.trail = btn.dataset.id;
+        writeSave();
+        rerender();
+        break;
+      case 'league-claim': {
+        btn.disabled = true;
+        const res = await Online.leagueClaim(btn.dataset.week);
+        if (res.ok) { save.gems += res.gems; writeSave(); Sound.play.coin(); toast(`+${res.gems} gems`); }
+        else toast(res.error);
+        renderLeague();
+        return;
+      }
       case 'online-retry': {
         btn.disabled = true;
         btn.textContent = 'Connecting…';
@@ -1121,6 +1391,13 @@ const UI = (() => {
         const c = levelChoices[+btn.dataset.i];
         if (!g || !c) return;
         Haptics.tap();
+        if (banishMode) {
+          banishMode = false;
+          const next = g.banish(c);
+          if (next) { toast(`${c.kind === 'weapon' ? WEAPONS[c.id].name : PASSIVES[c.id].name} banished for this run`); showLevelUp(g, next, 300); }
+          else { toast("That card can't be banished"); showLevelUp(g, levelChoices, 0); }
+          return;
+        }
         if (g.role === 'client') { Coop.sendPick(c); showWaiting(); return; }
         g.choose(c);
         if (g.state === 'levelup' && !g.local.pick) showWaiting();
@@ -1134,7 +1411,27 @@ const UI = (() => {
         break;
       }
       case 'chest-ok':
+        if (jackpot) { jackpot.finish(); return; }
         if (g) g.closeChest();
+        show(null);
+        break;
+      case 'chest-skip':
+        if (jackpot) jackpot.finish();
+        return;
+      case 'banish-mode':
+        banishMode = !banishMode;
+        if (g) showLevelUp(g, levelChoices, 0);
+        break;
+      case 'skip':
+        if (!g || g.state !== 'levelup') return;
+        banishMode = false;
+        g.choose({ kind: 'skip' });
+        if (g.state === 'levelup' && !g.local.pick) showWaiting();
+        else show(null);
+        break;
+      case 'proto':
+        if (!g) return;
+        g.chooseProtocol(btn.dataset.id);
         show(null);
         break;
       case 'modal-close': closeModal(); break;
@@ -1233,7 +1530,7 @@ const UI = (() => {
   }
 
   return {
-    init, show, toast, tick, showPause, showLevelUp, showWaiting, showChest, showOver, setOverOnline, applySettings, rerender, modal, closeModal,
+    init, show, toast, tick, showPause, showLevelUp, showWaiting, showChest, showProtocol, showOver, setOverOnline, applySettings, rerender, modal, closeModal,
     maybeShowLogin, current, renderCoop,
     showNewPassword() {
       modal(`<h2 class="title">New password</h2><p class="sub">Choose a new password for your account.</p>
@@ -1242,6 +1539,7 @@ const UI = (() => {
         <button class="btn primary" data-act="set-pass">Save password</button>`);
     },
     showMenu() { renderMenu(); show('scr-menu'); el('scr-menu').scrollTop = 0; setTimeout(maybeShowLogin, 350); },
+    showComeback,
     enterGame() { closeModal(); show(null); },
     setRaid(r) { raidCache = r; if (current() === 'scr-online') renderOnline(); },
     setOnlineCount(n) { onlineCount = n; },

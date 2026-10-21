@@ -71,7 +71,18 @@ class Game {
     this.rerollCount = 0;
     this.evolved = [];
     this.wardensKilled = 0;
-    this.runStats = { chests: 0, elites: 0, dmg: 0 };
+    this.runStats = { chests: 0, elites: 0, dmg: 0, beacons: 0 };
+    this.protoPool = opts.protocols || [];
+    this.protoPicks = 0;
+    this.protoOffers = null;
+    this.pendingProto = false;
+    this.beacon = null;
+    this.nextBeacon = BEACON_FIRST;
+    this.chainQ = [];
+    this.hitstop = 0;
+    this.level20At = 0;
+    this.evoReady = new Set();
+    this.supplyAt = 0;
     this.hint = save.seenTutorial ? 0 : 1;
     this.movedFor = 0;
     this.finished = false;
@@ -96,6 +107,7 @@ class Game {
       }
       if (DEBUG.startAt) this.skipTo(DEBUG.startAt);
       else if (this.role !== 'client') this.openingWave();
+      this.pendingProto = this.role === 'solo' && this.protoPool.length > 0;
     }
     this.sealSet();
     this.cam.x = this.local.x;
@@ -140,6 +152,7 @@ class Game {
       input: { x: 0, y: 0 }, net: null, down: false, reviveT: 0, shield: 0, shieldT: 4,
       phoenix: (meta.pets || []).some((p) => p.id === 'phoenix') ? 1 : 0,
       gold: 0, dmgDealt: 0, lastHitT: 0, bestNoHit: 0, pick: null, chests: 0,
+      protos: new Set(), banished: new Set(), banishes: 2, leechN: 0, pulseT: 10,
       pets: (meta.pets || []).filter((p) => PETS[p.id]).map((p, k) => ({ id: p.id, stars: clamp(p.stars || 1, 1, PET_MAX_STARS), x: 0, y: 0, cd: 1.5 + k, ang: k * Math.PI })),
     };
   }
@@ -188,6 +201,7 @@ class Game {
     s.maxHp += 2 * m;
     for (const p of sh.pets) if (PETS[p.id].stat) PETS[p.id].stat(s, p.stars);
     for (const p of sh.passives) PASSIVES[p.id].apply(s, p.level);
+    for (const id of sh.protos) if (PROTOCOLS[id].stats) PROTOCOLS[id].stats(s);
     if (this.mod) this.mod.apply(s);
     s.armor = Math.min(0.6, s.armor);
     s.crit = Math.min(0.6, s.crit);
@@ -256,6 +270,8 @@ class Game {
       if (this.pickTimer <= 0) for (const sh of this.ships) if (sh.pick) this.choose(sh.pick[0], sh);
     }
     if (!this.running()) return;
+    // A few frames of freeze sell the big hits (elite and boss kills, evolutions).
+    if (this.hitstop > 0) { this.hitstop -= dt; return; }
     this.acc += dt * this.timeScale * this.world.gameSpeed * DEBUG.speed;
     const maxSteps = 8 * Math.max(1, DEBUG.speed);
     let n = 0;
@@ -290,7 +306,14 @@ class Game {
         if (sh.down) continue;
         for (const w of sh.weapons) WEAPON_FIRE[w.id](this, sh, w, dt);
         for (const pet of sh.pets) PET_ACT[pet.id](this, sh, pet, dt);
+        if (sh.protos.size) this.protoTick(sh, dt);
       }
+      for (let n = 0; n < 8 && this.chainQ.length; n++) {
+        const c = this.chainQ.shift();
+        this.explode(c.x, c.y, c.r, c.dmg, '#ff8a3c', true, c.sh);
+      }
+      if (this.role === 'solo') this.updateBeacon(dt);
+      if (this.supplyAt && this.t >= this.supplyAt) this.supplyDrop();
     }
     this.updateEnemies(dt, playing);
     this.updateBullets(dt);
@@ -308,9 +331,147 @@ class Game {
         const clean = this.t - sh.lastHitT;
         if (clean > sh.bestNoHit) sh.bestNoHit = clean;
       }
-      if (this.pendingChest) this.openChest();
+      if (this.pendingProto) this.openProtocol();
+      else if (this.pendingChest) this.openChest();
       else if (this.pendingLevels > 0) this.openLevelUp();
     }
+  }
+
+  // ---------- protocols ----------
+  openProtocol() {
+    this.pendingProto = false;
+    const sh = this.local, pool = this.protoPool.filter((id) => PROTOCOLS[id] && !sh.protos.has(id));
+    if (!pool.length || !this.hooks.protocol) return;
+    // Seeded like level-ups, so duel opponents get the same offers.
+    const rng = mulberry32(this.seed ^ 0x51ed27 ^ Math.imul(this.protoPicks + 1, 40503));
+    const offers = [];
+    while (offers.length < 3 && pool.length) offers.push(pool.splice(Math.floor(rng() * pool.length), 1)[0]);
+    this.protoOffers = offers;
+    this.state = 'proto';
+    Input.reset();
+    Sound.play.levelup();
+    this.hooks.protocol(this, offers);
+  }
+
+  chooseProtocol(id) {
+    if (this.state !== 'proto') return;
+    if (!this.protoOffers.includes(id)) id = this.protoOffers[0];
+    this.protoOffers = null;
+    this.protoPicks++;
+    this.addProtocol(this.local, id);
+    const d = PROTOCOLS[id];
+    this.say(d.name.toUpperCase(), { color: d.color, sub: 'Protocol online', small: true });
+    Sound.play.pick();
+    this.state = 'play';
+  }
+
+  addProtocol(sh, id) {
+    if (!PROTOCOLS[id] || sh.protos.has(id)) return;
+    sh.protos.add(id);
+    if (id === 'heart') sh.revives++;
+    if (id === 'midas') this.world.enemyHp *= 1.15;
+    this.recomputeStats(sh);
+  }
+
+  protoTick(sh, dt) {
+    if (sh.protos.has('pulse') && (sh.pulseT -= dt) <= 0) {
+      sh.pulseT = 10;
+      for (const q of this.pickups) {
+        if (q.kind === 'gem' && !q.attract && Math.abs(q.x - sh.x) < View.w * 0.75 && Math.abs(q.y - sh.y) < View.h * 0.75) {
+          q.attract = sh;
+          q.sp = 150;
+        }
+      }
+      this.pushWave(sh.x, sh.y, 150, 260, PROTOCOLS.pulse.color, 25 * sh.stats.might * (1 + this.t / 240), sh);
+    }
+  }
+
+  // ---------- beacons ----------
+  updateBeacon(dt) {
+    const L = this.local;
+    if (!this.beacon) {
+      if (this.t >= this.nextBeacon && this.t < RUN_LENGTH - 30 && !this.boss && !L.down) this.spawnBeacon();
+      return;
+    }
+    const b = this.beacon, inside = !L.down && (L.x - b.x) ** 2 + (L.y - b.y) ** 2 < b.r * b.r;
+    b.t += dt;
+    if (b.kind === 'uplink') {
+      b.prog = clamp(b.prog + (inside ? dt / BEACON_HOLD : -dt / (BEACON_HOLD * 2)), 0, 1);
+      if (b.prog >= 1) this.beaconReward(b);
+      else if (b.t > 35 && b.prog === 0) this.endBeacon();
+    } else if (!b.active) {
+      if (inside) {
+        b.active = true;
+        b.left = BEACON_PURGE_TIME;
+        b.kills0 = this.kills;
+        this.say('PURGE', { color: '#ff4b5c', sub: `Destroy ${b.need} enemies in ${BEACON_PURGE_TIME} seconds`, small: true });
+        Sound.play.levelup();
+      } else if (b.t > 35) this.endBeacon();
+    } else {
+      b.left -= dt;
+      b.got = this.kills - b.kills0;
+      if (b.got >= b.need) {
+        this.dropPickup('chest', L.x + rand(-40, 40), L.y - 60, 0);
+        this.say('PURGE COMPLETE', { color: '#ffd447', sub: 'A chest dropped', small: true });
+        this.runStats.beacons++;
+        Sound.play.chest();
+        this.endBeacon();
+      } else if (b.left <= 0) {
+        this.say('PURGE FAILED', { color: '#ff4b5c', small: true, dur: 1.4 });
+        this.endBeacon();
+      }
+    }
+  }
+
+  spawnBeacon() {
+    const L = this.local, a = rand(0, TAU), d = rand(320, 440);
+    const kind = this.t > 90 && Math.random() < 0.45 ? 'purge' : 'uplink';
+    this.beacon = { kind, x: L.x + Math.cos(a) * d, y: L.y + Math.sin(a) * d, r: kind === 'uplink' ? 62 : 48, t: 0, prog: 0, active: false, left: 0, got: 0, need: Math.round(25 + this.t * 0.2) };
+    this.say(kind === 'uplink' ? 'UPLINK DETECTED' : 'PURGE BEACON', { color: kind === 'uplink' ? '#39f3ff' : '#ff4b5c', sub: kind === 'uplink' ? 'Hold position inside it for a reward' : 'Touch it to start a challenge', small: true, dur: 1.8 });
+  }
+
+  beaconReward(b) {
+    const L = this.local, gifts = ['xp', 'gold', 'reroll', 'magnet'];
+    if (!this.world.noHeal && L.hp < L.stats.maxHp * 0.7) gifts.push('heal', 'heal');
+    const g = pick(gifts);
+    let sub = '';
+    if (g === 'heal') { L.hp = Math.min(L.stats.maxHp, L.hp + L.stats.maxHp * 0.4); sub = 'Hull repaired'; }
+    else if (g === 'gold') { const n = Math.round(25 * L.stats.goldMul * this.world.reward); L.gold += n; sub = `+${n} gold`; }
+    else if (g === 'reroll') { L.rerolls++; sub = '+1 reroll'; }
+    else if (g === 'magnet') { this.collect({ kind: 'vortex' }, L); sub = 'Every gem is coming to you'; }
+    else { for (let i = 0; i < 6; i++) this.dropGem(b.x + rand(-30, 30), b.y + rand(-30, 30), Math.ceil(this.xpNext * 0.12)); sub = 'Data cache: XP'; }
+    this.pushWave(b.x, b.y, 170, 400, '#39f3ff', 0);
+    this.say('UPLINK COMPLETE', { color: '#39f3ff', sub, small: true });
+    this.runStats.beacons++;
+    Sound.play.evolve();
+    this.endBeacon();
+  }
+
+  endBeacon() {
+    this.beacon = null;
+    this.nextBeacon = this.t + rand(BEACON_GAP[0], BEACON_GAP[1]);
+  }
+
+  // Tell the player when a weapon is ready to evolve, and send an elite their way soon.
+  checkEvoReady(sh) {
+    if (sh !== this.local) return;
+    for (const w of this.canEvolve(sh)) {
+      if (this.evoReady.has(w.id)) continue;
+      this.evoReady.add(w.id);
+      this.say('EVOLUTION READY', { color: '#ffd447', sub: `A supply chest is on its way`, small: true, dur: 2.6 });
+      if (!this.supplyAt) this.supplyAt = this.t + 5;
+    }
+  }
+
+  // A chest lands near you a few seconds after a weapon is ready to evolve.
+  supplyDrop() {
+    this.supplyAt = 0;
+    if (!this.canEvolve(this.local).length || this.finished) return;
+    const L = this.local, a = rand(0, TAU);
+    this.addPickup('chest', L.x + Math.cos(a) * 150, L.y + Math.sin(a) * 150, 0, 0);
+    this.ring(L.x + Math.cos(a) * 150, L.y + Math.sin(a) * 150, 60, '#ffd447');
+    this.say('SUPPLY DROP', { color: '#ffd447', sub: 'Grab the chest to evolve', small: true, dur: 1.8 });
+    Sound.play.chest();
   }
 
   updateShip(sh, dt, playing) {
@@ -380,7 +541,8 @@ class Game {
     sh.trail -= dt;
     if (sh.trail <= 0) {
       sh.trail = 0.035;
-      this.particle(sh.x - sh.fx * 9, sh.y - sh.fy * 9, -sh.fx * 40 + rand(-15, 15), -sh.fy * 40 + rand(-15, 15), 0.3, 5, sh.char.color);
+      const tr = TRAILS[sh.meta.trail], color = tr ? tr.colors[(sh.trailK = (sh.trailK || 0) + 1) % tr.colors.length] : sh.char.color;
+      this.particle(sh.x - sh.fx * 9, sh.y - sh.fy * 9, -sh.fx * 40 + rand(-15, 15), -sh.fy * 40 + rand(-15, 15), 0.3, 5, color);
     }
   }
 
@@ -428,7 +590,7 @@ class Game {
       rate = (2 + 18 * Math.pow(Math.min(1, t / RUN_LENGTH), 1.5)) * W.enemyCount;
       cap = Math.min(MAX_ENEMIES, (50 + t * 0.6) * W.enemyCount);
       if (t >= this.nextElite) {
-        this.nextElite += 30;
+        this.nextElite += this.ships.some((sh) => sh.protos.has('hunter')) ? 15 : 30;
         this.spawnEnemy(this.pickType(), { elite: true });
       }
     }
@@ -759,7 +921,7 @@ class Game {
       return;
     }
     sh.hp -= dmg * (1 - sh.stats.armor);
-    sh.inv = 0.55;
+    sh.inv = sh.protos.has('ghost') ? 1.1 : 0.55;
     sh.hurtFlash = 0.18;
     sh.lastHitT = this.t;
     if (sh === this.local) {
@@ -778,7 +940,8 @@ class Game {
       sh.hp = sh.stats.maxHp * (sh.phoenix >= 0 && sh.revives >= 0 ? 0.6 : 0.5);
       sh.inv = 2.5;
       if (sh === this.local) this.flash = 0.8;
-      this.pushWave(sh.x, sh.y, 260, 600, '#6dff9a', 500, sh);
+      const big = sh.protos.has('heart');
+      this.pushWave(sh.x, sh.y, big ? 640 : 260, 600, '#6dff9a', big ? 3000 : 500, sh);
       this.say(this.coop ? sh.name + ' revived' : 'REVIVED', { color: '#6dff9a' });
       Sound.play.evolve();
       return;
@@ -840,6 +1003,11 @@ class Game {
     };
     this.bullets.push(b);
     this.ev('b', Math.round(b.x), Math.round(b.y), Math.round(b.vx), Math.round(b.vy), c, big ? 1 : 0, +b.size.toFixed(2));
+    if (sh.protos && sh.protos.has('echo') && !this.echoing && Math.random() < 0.25) {
+      this.echoing = true;
+      this.fireBolt(sh, ang + rand(-0.22, 0.22), s, big, color);
+      this.echoing = false;
+    }
   }
 
   damage(e, dmg, nx, ny, kb, sh) {
@@ -913,7 +1081,18 @@ class Game {
       return;
     }
     this.dropGem(e.x, e.y, e.xp);
-    if (Math.random() < 0.04) this.dropPickup('coin', e.x, e.y, 1);
+    const owner = sh || this.local, P = owner.protos;
+    if (Math.random() < (P.has('midas') ? 0.08 : 0.04)) this.dropPickup('coin', e.x, e.y, 1);
+    if (P.has('chain') && Math.random() < 0.3 && this.chainQ.length < 24) {
+      this.chainQ.push({ x: e.x, y: e.y, r: 34 + e.r * 1.5, dmg: Math.min(e.maxHp * 0.6, 40 + this.t * 0.6) * owner.stats.might, sh: owner });
+    }
+    if (P.has('leech') && ++owner.leechN >= 50) {
+      owner.leechN = 0;
+      if (!this.world.noHeal && !owner.down) {
+        owner.hp = Math.min(owner.stats.maxHp, owner.hp + 5);
+        this.ring(owner.x, owner.y, 34, PROTOCOLS.leech.color);
+      }
+    }
     const r = Math.random(), heart = 0.004 * (sh ? sh.stats.heartMul : 1);
     if (r < heart) { if (!this.world.noHeal) this.dropPickup('heart', e.x, e.y, 0); }
     else if (r < heart + 0.0025) this.dropPickup('vortex', e.x, e.y, 0);
@@ -921,6 +1100,7 @@ class Game {
     if (e.d.split) for (let i = 0; i < 3; i++) this.spawnEnemy(e.d.split, { x: e.x + rand(-10, 10), y: e.y + rand(-10, 10) });
     if (e.elite) {
       this.runStats.elites++;
+      this.hitstop = 0.06;
       this.dropPickup('chest', e.x, e.y, 0);
       for (let i = 0; i < 5; i++) this.dropPickup('coin', e.x, e.y, 1);
     }
@@ -928,6 +1108,7 @@ class Game {
 
   killBoss(e) {
     this.boss = null;
+    this.hitstop = 0.12;
     this.shake = 18;
     this.flash = 0.6;
     Sound.play.boom();
@@ -935,6 +1116,7 @@ class Game {
     if (e.d.ai === 'warden') {
       this.wardensKilled++;
       this.dropPickup('chest', e.x, e.y, 1);
+      if (e.tier === 1 && this.role === 'solo' && this.protoPool.length) this.pendingProto = true;
       this.dropGem(e.x, e.y, e.xp);
       for (let i = 0; i < 8 + e.tier * 6; i++) this.dropPickup('coin', e.x, e.y, 1);
       Sound.setIntensity(0);
@@ -1186,6 +1368,7 @@ class Game {
       this.xp -= this.xpNext;
       this.level++;
       this.seal.l = this.level ^ this.seal.m;
+      if (this.level === 20 && !this.level20At) this.level20At = this.t;
       this.xpNext = xpForLevel(this.level);
       this.pendingLevels++;
     }
@@ -1275,20 +1458,21 @@ class Game {
     const pool = [];
     const ownedW = new Set(sh.weapons.map((w) => w.id));
     const ownedP = new Map(sh.passives.map((p) => [p.id, p]));
+    const banned = (kind, id) => sh.banished.has(kind + ':' + id);
+    // Evolutions only come from chests; level-ups build toward them.
     for (const w of sh.weapons) {
-      if (w.evo) continue;
+      if (w.evo || banned('weapon', w.id)) continue;
       if (w.level < weaponMax(w.id)) pool.push([{ kind: 'weapon', id: w.id, level: w.level + 1 }, 10]);
-      else if (ownedP.has(WEAPONS[w.id].evo.with)) pool.push([{ kind: 'evo', id: w.id }, 16]);
     }
     if (sh.weapons.length < sh.stats.maxWeapons) {
-      for (const id in WEAPONS) if (!ownedW.has(id)) pool.push([{ kind: 'weapon', id, level: 1 }, 4]);
+      for (const id in WEAPONS) if (!ownedW.has(id) && !banned('weapon', id)) pool.push([{ kind: 'weapon', id, level: 1 }, 4]);
     }
     const wanted = new Set(sh.weapons.filter((w) => !w.evo).map((w) => WEAPONS[w.id].evo.with));
     for (const p of sh.passives) {
-      if (p.level < PASSIVES[p.id].max) pool.push([{ kind: 'passive', id: p.id, level: p.level + 1 }, 8]);
+      if (p.level < PASSIVES[p.id].max && !banned('passive', p.id)) pool.push([{ kind: 'passive', id: p.id, level: p.level + 1 }, 8]);
     }
     if (sh.passives.length < MAX_PASSIVES) {
-      for (const id in PASSIVES) if (!ownedP.has(id)) pool.push([{ kind: 'passive', id, level: 1 }, wanted.has(id) ? 7 : 3.5]);
+      for (const id in PASSIVES) if (!ownedP.has(id) && !banned('passive', id)) pool.push([{ kind: 'passive', id, level: 1 }, wanted.has(id) ? 7 : 3.5]);
     }
     const out = [];
     while (out.length < n && pool.length) {
@@ -1318,20 +1502,36 @@ class Game {
       else sh.hp = Math.min(sh.stats.maxHp, sh.hp + sh.stats.maxHp * 0.3);
     } else if (o.kind === 'gold') {
       sh.gold += 25 * sh.stats.goldMul;
+    } else if (o.kind === 'skip') {
+      sh.gold += 10 * sh.stats.goldMul;
     }
   }
 
   // Pick a card. In co-op the run resumes once every player has picked.
   choose(o, sh = this.local) {
     if (this.state !== 'levelup' || !sh.pick) return;
-    const valid = sh.pick.find((c) => c.kind === o.kind && c.id === o.id) || sh.pick[0];
+    const valid = o.kind === 'skip' && !this.coop ? o : sh.pick.find((c) => c.kind === o.kind && c.id === o.id) || sh.pick[0];
     sh.pick = null;
     this.applyChoice(valid, sh);
+    if (sh.protos.has('stasis')) for (const e of this.enemies) if (!e.boss) e.slowT = Math.max(e.slowT, 3);
+    if (sh.protos.has('overflow') && !this.world.noHeal) sh.hp = Math.min(sh.stats.maxHp, sh.hp + sh.stats.maxHp * 0.1);
+    this.checkEvoReady(sh);
     if (sh === this.local) Sound.play.pick();
     if (this.ships.some((s) => s.pick)) return;
     this.pendingLevels--;
     for (const s of this.ships) if (!s.down) this.pushWave(s.x, s.y, 150, 320, '#ffffff', 0);
     this.state = 'play';
+  }
+
+  // Remove a card from this run's pool for good, and deal a fresh hand.
+  banish(o, sh = this.local) {
+    if (this.state !== 'levelup' || this.coop || !sh.pick || sh.banishes <= 0) return null;
+    if (o.kind !== 'weapon' && o.kind !== 'passive') return null;
+    sh.banishes--;
+    sh.banished.add(o.kind + ':' + o.id);
+    this.rerollCount++;
+    sh.pick = this.rollChoices(sh);
+    return sh.pick;
   }
 
   reroll(sh = this.local) {
@@ -1355,6 +1555,7 @@ class Game {
         writeSave();
       }
       this.flash = 0.7;
+      this.hitstop = 0.1;
     }
     this.say(this.coop ? `${sh.name}: ${WEAPONS[id].evo.name}` : 'EVOLUTION', { color: '#ffd447', sub: this.coop ? 'Evolution!' : WEAPONS[id].evo.name });
     Sound.play.evolve();
@@ -1364,24 +1565,30 @@ class Game {
     return sh.weapons.filter((w) => !w.evo && w.level >= weaponMax(w.id) && sh.passives.some((p) => p.id === WEAPONS[w.id].evo.with));
   }
 
+  // A chest holds 1, 3 or 5 rewards. Ready evolutions always come first.
   chestReward(sh, tier) {
-    const reward = { evo: null, ups: [], gold: 0 };
-    const eligible = this.canEvolve(sh);
-    if (eligible.length) {
-      const w = pick(eligible);
-      reward.evo = w.id;
-      this.evolve(sh, w.id);
-    } else {
-      const n = tier >= 1 ? 2 : 1;
-      for (let i = 0; i < n; i++) {
-        const c = this.rollChoices(sh, 1)[0];
-        if (c.kind === 'heal' || c.kind === 'gold') break;
-        this.applyChoice(c, sh);
-        reward.ups.push(c);
-        this.rerollCount++;
+    const reward = { evo: null, evos: [], ups: [], gold: 0, n: 1 };
+    const odds = CHEST_ODDS[tier >= 1 ? 1 : 0], luck = (sh.protos.has('hunter') ? 0.12 : 0) + (this.sector - 1) * 0.02;
+    const r = Math.random();
+    reward.n = r < odds[0] + luck / 2 ? 5 : r < odds[0] + odds[1] + luck ? 3 : 1;
+    let spare = 0;
+    for (let i = 0; i < reward.n; i++) {
+      const eligible = this.canEvolve(sh);
+      if (eligible.length) {
+        const w = pick(eligible);
+        this.evolve(sh, w.id);
+        reward.evos.push(w.id);
+        continue;
       }
+      const c = this.rollChoices(sh, 1)[0];
+      this.rerollCount++;
+      if (c.kind === 'heal' || c.kind === 'gold') { spare++; continue; }
+      this.applyChoice(c, sh);
+      reward.ups.push(c);
     }
-    reward.gold = Math.round((tier >= 1 ? 30 : 15) * sh.stats.goldMul * this.world.reward);
+    reward.evo = reward.evos[0] || null;
+    reward.gold = Math.round(((tier >= 1 ? 20 : 10) * (1 + (reward.n - 1) * 0.25) + spare * 5) * sh.stats.goldMul * this.world.reward);
+    this.checkEvoReady(sh);
     sh.gold += reward.gold;
     sh.chests++;
     if (sh === this.local) this.runStats.chests++;
@@ -1438,7 +1645,8 @@ class Game {
       won, quit, mode: this.mode, sector: this.sector, seed: this.seed, daily: this.daily, coop: this.coop,
       time: this.t, kills: this.kills, level: this.level, gold, score, charId: L.charId,
       chests: this.runStats.chests, elites: this.runStats.elites, dmg: Math.round(this.runStats.dmg), runId: this.runId || null,
-      wardens: this.wardensKilled, evolutions: this.evolved.length, bestNoHit: L.bestNoHit,
+      beacons: this.runStats.beacons, wardens: this.wardensKilled, evolutions: this.evolved.length, bestNoHit: L.bestNoHit,
+      protocols: [...L.protos], level20At: this.level20At,
       weapons: L.weapons.map((w) => ({ id: w.id, level: w.level, evo: w.evo })),
       passives: L.passives.map((p) => ({ id: p.id, level: p.level })),
     };
@@ -1463,6 +1671,8 @@ class Game {
       final: this.finalSpawned, bestNoHit: L.bestNoHit, runStats: Object.assign({}, this.runStats), rerollCount: this.rerollCount,
       boss: b ? { kind: b.type, tier: b.tier, hp: b.hp / b.maxHp } : null, runId: this.runId || null,
       spawned: this.spawned, cp: this.cp ? Object.assign({}, this.cp) : null, tainted: this.tainted || null,
+      protos: [...L.protos], protoPicks: this.protoPicks, pendingProto: this.pendingProto || this.state === 'proto',
+      banished: [...L.banished], banishes: L.banishes, level20At: this.level20At, nextBeacon: this.nextBeacon,
     };
   }
 
@@ -1486,6 +1696,17 @@ class Game {
       nw.evo = w.evo;
     }
     L.passives = s.passives.filter((p) => PASSIVES[p.id]).map((p) => ({ id: p.id, level: p.level }));
+    for (const id of s.protos || []) {
+      if (!PROTOCOLS[id]) continue;
+      L.protos.add(id);
+      if (id === 'midas') this.world.enemyHp *= 1.15;
+    }
+    this.protoPicks = s.protoPicks || 0;
+    this.pendingProto = !!s.pendingProto && this.protoPool.length > 0;
+    L.banished = new Set(s.banished || []);
+    if (s.banishes !== undefined) L.banishes = s.banishes;
+    this.level20At = s.level20At || 0;
+    if (s.nextBeacon) this.nextBeacon = s.nextBeacon;
     this.recomputeStats(L);
     L.hp = clamp(s.hp, 1, L.stats.maxHp);
     L.inv = 2;
@@ -1549,12 +1770,13 @@ class Game {
     let best = null, bd = 320 * 320;
     for (const k of this.pickups) {
       const d2 = (k.x - sh.x) ** 2 + (k.y - sh.y) ** 2;
+      if (k.kind === 'chest' && d2 < 600 * 600) { best = k; bd = d2; break; }
       if (d2 < bd) { bd = d2; best = k; }
     }
     if (best) {
-      const d = Math.sqrt(bd) || 1;
-      fx += ((best.x - sh.x) / d) * 0.02;
-      fy += ((best.y - sh.y) / d) * 0.02;
+      const d = Math.sqrt(bd) || 1, pull = best.kind === 'chest' ? 0.08 : 0.02;
+      fx += ((best.x - sh.x) / d) * pull;
+      fy += ((best.y - sh.y) / d) * pull;
     }
     const m = Math.hypot(fx, fy);
     return m < 1e-4 ? [0, 0] : [fx / m, fy / m];

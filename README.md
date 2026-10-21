@@ -21,6 +21,19 @@ Drag anywhere to move. Your weapons fire on their own. Survive 8 minutes and des
   - Friend duels on the same seed
   - Live 2–4 player co-op with room codes and invite links
 - **Daily run:** one try per day, the same seed and modifier for everyone, and its own leaderboard.
+- **Every run is different:**
+  - **Protocols:** 12 rule-changing cards; pick one at the start and another after the second Warden. 9 of them are secrets that unlock through feats.
+  - **Jackpot chests:** each chest holds 1, 3 or 5 rewards and reveals them slot-machine style. Evolutions only come from chests, and a supply chest drops as soon as one is ready.
+  - **Beacons:** about once a minute, an uplink to hold or a purge challenge appears.
+  - **Banish and skip** on level-up.
+- **Reasons to come back:**
+  - Daily play streak with freezes, an earn-back after a miss, and milestone rewards
+  - Free 30-tier **Neon Pass** that resets every 4 weeks, plus 4 weekly challenges
+  - Weekly **leagues** of 20 players: the top 5 move up
+  - Drone patrol that collects gold while you're away
+  - A welcome-back gift
+  - Cosmetic ship trails
+  - Menus that open up over a new player's first runs
 
 ## Turning on online features
 
@@ -62,6 +75,7 @@ Test switches (localhost only):
 | `src/render.js` | Canvas drawing |
 | `src/audio.js` | Synthesized sound and music |
 | `supabase/schema.sql` | Database, access rules and anti-cheat functions |
+| `src/meta.js` | Streak, Neon Pass, weekly challenges, patrol, welcome back, unlocking menus |
 | `src/guard.js` | In-game anti-cheat: 30-second checkpoints, tamper and speed checks |
 | `src/update.js` | Auto-update: reloads into new versions, and learns the server's clock |
 | `tools/build.mjs` | Production build |

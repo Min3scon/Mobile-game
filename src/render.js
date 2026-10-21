@@ -353,6 +353,7 @@ function drawGame(g) {
     ctx.fill();
   }
   ctx.globalCompositeOperation = 'source-over';
+  if (g.beacon) drawBeacon(g.beacon, T);
 
   // pickups
   for (const k of g.pickups) {
@@ -585,9 +586,48 @@ function drawGame(g) {
   if (g.state === 'play') drawStick();
 }
 
+// Beacons: a pulsing ring with a progress arc (uplink) or a countdown (purge).
+function drawBeacon(b, T) {
+  const color = b.kind === 'uplink' ? '#39f3ff' : '#ff4b5c', pulse = 0.5 + 0.5 * Math.sin(T * 5);
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = 0.18 + 0.1 * pulse;
+  drawSprite(spriteDot(color), b.x, b.y, (b.r / 16) * 1.3);
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.setLineDash([10, 8]);
+  ctx.lineDashOffset = -T * 30;
+  ctx.strokeStyle = rgba(color, 0.55 + 0.3 * pulse);
+  ctx.lineWidth = 2.5;
+  ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, TAU); ctx.stroke();
+  ctx.setLineDash([]);
+  const frac = b.kind === 'uplink' ? b.prog : b.active ? b.got / b.need : 0;
+  if (frac > 0) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 6;
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r + 7, -Math.PI / 2, -Math.PI / 2 + TAU * clamp(frac, 0, 1)); ctx.stroke();
+  }
+  ctx.save();
+  ctx.translate(b.x, b.y);
+  ctx.rotate(T * (b.kind === 'uplink' ? 1.2 : -2));
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  if (b.kind === 'uplink') { ctx.moveTo(0, -14); ctx.lineTo(12, 7); ctx.lineTo(-12, 7); ctx.closePath(); }
+  else { ctx.moveTo(-11, -11); ctx.lineTo(11, 11); ctx.moveTo(11, -11); ctx.lineTo(-11, 11); }
+  ctx.stroke();
+  ctx.restore();
+  ctx.font = '700 12px ' + FONT;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = color;
+  const label = b.kind === 'uplink' ? (b.prog > 0 ? Math.round(b.prog * 100) + '%' : 'UPLINK') : b.active ? `${b.got}/${b.need} · ${Math.ceil(b.left)}s` : 'PURGE';
+  ctx.fillText(label, b.x, b.y - b.r - 16);
+}
+
 function drawIndicators(g, camX, camY) {
   const targets = [];
   if (g.boss && !g.boss.dead) targets.push([g.boss.x, g.boss.y, g.boss.d.color]);
+  if (g.beacon && !(g.beacon.kind === 'purge' && g.beacon.active)) targets.push([g.beacon.x, g.beacon.y, g.beacon.kind === 'uplink' ? '#39f3ff' : '#ff4b5c']);
   for (const k of g.pickups) if (k.kind === 'chest') targets.push([k.x, k.y, '#ffd447']);
   if (!targets.length) return;
   ctx.setTransform(View.dpr, 0, 0, View.dpr, 0, 0);
@@ -654,6 +694,12 @@ function drawHUD(g) {
     ctx.font = '700 11px ' + FONT;
     ctx.fillStyle = SECTORS[g.sector].color;
     ctx.fillText((g.mode === 'duel' ? 'DUEL · ' : g.coop ? 'CO-OP · ' : '') + SECTORS[g.sector].name.toUpperCase(), W / 2, top + 54);
+  }
+  if (g.beacon && g.beacon.kind === 'purge' && g.beacon.active) {
+    const b = g.beacon;
+    ctx.font = '700 14px ' + FONT;
+    ctx.fillStyle = '#ff4b5c';
+    ctx.fillText(`PURGE ${Math.min(b.got, b.need)}/${b.need} · ${Math.ceil(Math.max(0, b.left))}s`, W / 2, top + (g.boss && !g.boss.dead ? 98 : g.sector > 1 || g.mode === 'duel' ? 72 : 58));
   }
   if (g.local.down && g.state === 'play') {
     ctx.font = '700 16px ' + FONT;

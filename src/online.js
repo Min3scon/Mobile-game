@@ -189,6 +189,15 @@ const Online = (() => {
       async reportRun(runId, reason) {
         return rpc('report_run', { p_run: runId, p_reason: reason });
       },
+      async league() {
+        if (!user) return null;
+        const res = await rpc('league_status');
+        return res.ok ? res.data : null;
+      },
+      async leagueClaim(week) {
+        const res = await rpc('league_claim', { p_week: week });
+        return res.ok ? { ok: true, gems: res.data } : res;
+      },
       // Admin tools; the server refuses anyone who is not an admin.
       async admin(name, args) {
         if (!ADMIN_RPCS.includes(name)) return { ok: false, error: 'Unknown admin action' };
@@ -436,6 +445,19 @@ const Online = (() => {
         if (r && user && r.uid === user.id && !r.tamper) { r.tamper = String(reason || 'unknown').slice(0, 100); r.usedScore = true; write('runs', runs); }
         return { ok: true };
       },
+      async league() {
+        await lag();
+        if (!user) return null;
+        const pts = {};
+        for (const sc of read('scores', [])) {
+          if (sc.flagged || sc.week !== week() || activeBan(sc.uid)) continue;
+          pts[sc.uid] = (pts[sc.uid] || 0) + Math.floor(Math.sqrt(Math.max(0, sc.score)));
+        }
+        const group = Object.entries(pts).map(([uid, p]) => ({ username: nameOf(uid) || 'Pilot', pts: p, me: uid === user.id })).sort((a, b) => b.pts - a.pts);
+        const d = new Date(), monday = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - ((d.getUTCDay() + 6) % 7)));
+        return { week: monday.toISOString().slice(0, 10), ends: new Date(+monday + 7 * 86400000).toISOString(), tier: 1, joined: user.id in pts, pts: pts[user.id] || 0, group, result: null };
+      },
+      async leagueClaim() { await lag(); return err('Nothing to claim'); },
       async myStatus() {
         await lag();
         if (!user) return null;
@@ -652,10 +674,10 @@ const Online = (() => {
     room(code, info) { return drv ? drv.room(code, info) : null; },
     watchOnline(cb) { return drv ? drv.watchOnline(cb) : () => {}; },
   };
-  for (const name of ['signUp', 'signIn', 'signOut', 'resetPassword', 'updatePassword', 'setUsername', 'pushSave', 'deleteAccount', 'startRun', 'submitScore', 'checkpoint', 'reportRun', 'admin', 'raidHit', 'raidClaim', 'duelCreate', 'duelSubmit']) {
+  for (const name of ['signUp', 'signIn', 'signOut', 'resetPassword', 'updatePassword', 'setUsername', 'pushSave', 'deleteAccount', 'startRun', 'submitScore', 'checkpoint', 'reportRun', 'admin', 'leagueClaim', 'raidHit', 'raidClaim', 'duelCreate', 'duelSubmit']) {
     api[name] = (...a) => (drv ? drv[name](...a).catch((e) => ({ ok: false, error: friendly(e && e.message) })) : offline());
   }
-  for (const name of ['loadSave', 'myBest', 'myStatus', 'raid', 'duelGet']) {
+  for (const name of ['loadSave', 'myBest', 'myStatus', 'league', 'raid', 'duelGet']) {
     api[name] = (...a) => (drv ? drv[name](...a).catch(() => null) : Promise.resolve(null));
   }
   for (const name of ['leaderboard', 'myDuels']) {

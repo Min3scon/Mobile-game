@@ -198,6 +198,42 @@ const PASSIVES = {
   lens: { name: 'Crit Lens', icon: 'lens', color: '#ff9f43', max: 5, desc: '+5% crit chance, +20% crit damage', apply: (s, l) => { s.crit += 0.05 * l; s.critMul += 0.2 * l; } },
 };
 
+// Protocols: rule-changing cards. Pick one when a run starts and a second after the second Warden.
+// unlock: null = available from the start; otherwise a secret, checked when a run ends.
+const PROTOCOLS = {
+  chain: { name: 'Chain Reaction', icon: 'nova', color: '#ff8a3c', desc: 'Destroyed enemies can burst, hurting everything around them.', unlock: null },
+  pulse: { name: 'Magnet Pulse', icon: 'magnet', color: '#6dff9a', desc: 'Every 10s, pull in every gem on screen and shock enemies near you.', unlock: null },
+  leech: { name: 'Leech Matrix', icon: 'heart', color: '#ff4b8b', desc: 'Every 50 kills restores 5 HP.', unlock: null },
+  glass: { name: 'Glass Engine', icon: 'core', color: '#ff6b8b', desc: '+50% damage, but 40% less max HP.', stats: (s) => { s.might += 0.5; s.maxHp *= 0.6; },
+    unlock: { hint: 'Reach level 30 in one run', test: (r) => r.level >= 30 } },
+  crit: { name: 'Critical Mass', icon: 'lens', color: '#ff9f43', desc: '+8% crit chance, and crits hit 50% harder.', stats: (s) => { s.crit += 0.08; s.critMul += 1; },
+    unlock: { hint: 'Max out the Crit Lens', test: (r) => r.passives.some((p) => p.id === 'lens' && p.level >= 5) } },
+  midas: { name: 'Midas Code', icon: 'gold', color: '#ffd447', desc: '+50% gold and coins drop twice as often. Enemies get 15% more health.', stats: (s) => { s.goldMul += 0.5; },
+    unlock: { hint: 'Earn 400 gold in one run', test: (r) => r.gold >= 400 } },
+  stasis: { name: 'Stasis Field', icon: 'clock', color: '#7db8ff', desc: 'Every level-up slows all enemies for 3 seconds.',
+    unlock: { hint: 'Evolve two weapons in one run', test: (r) => r.evolutions >= 2 } },
+  echo: { name: 'Echo Shot', icon: 'splitter', color: '#b6ff3d', desc: 'Shots have a 25% chance to fire a twin.',
+    unlock: { hint: 'Destroy 2,000 enemies in one run', test: (r) => r.kills >= 2000 } },
+  heart: { name: 'Second Heart', icon: 'revive', color: '#6dff9a', desc: 'One extra revive, and reviving blasts the whole screen.',
+    unlock: { hint: 'Defeat the Queen', test: (r) => r.won } },
+  hunter: { name: 'Elite Hunter', icon: 'chest', color: '#ffd447', desc: 'Elites appear twice as often, and chests hold more.',
+    unlock: { hint: 'Destroy 8 elites in one run', test: (r) => r.elites >= 8 } },
+  ghost: { name: 'Phase Drive', icon: 'boots', color: '#e9e4ff', desc: '+20% move speed. After a hit you are untouchable twice as long.', stats: (s) => { s.speed += 0.2; },
+    unlock: { hint: 'Go 3 minutes without being hit', test: (r) => r.bestNoHit >= 180 } },
+  overflow: { name: 'Overflow', icon: 'gem', color: '#4da3ff', desc: '+25% XP, and every level-up heals 10% HP.', stats: (s) => { s.xpMul += 0.25; },
+    unlock: { hint: 'Reach level 20 before 5:00', test: (r) => r.level20At > 0 && r.level20At <= 300 } },
+};
+const PROTOCOL_STARTERS = Object.keys(PROTOCOLS).filter((id) => !PROTOCOLS[id].unlock);
+
+// Beacons: short side goals that show up about once a minute.
+const BEACON_FIRST = 45;
+const BEACON_GAP = [55, 75];
+const BEACON_HOLD = 4; // seconds to stand in an uplink
+const BEACON_PURGE_TIME = 20;
+
+// Chest jackpots: chance of 5 and 3 rewards (elite chest, Warden chest). Otherwise 1.
+const CHEST_ODDS = [[0.05, 0.25], [0.15, 0.45]];
+
 // unlock: { gold } | { gems } | { rank } | { queen: true } | { sector }
 const CHARS = {
   volt: { name: 'Volt', color: '#39f3ff', weapon: 'blaster', unlock: {}, perk: 'Weapons recharge 5% faster', stats: (s) => { s.cdMul *= 0.95; } },
@@ -379,6 +415,84 @@ const DAILY_POOL = [
 ];
 const DAILY_REWARD = { gold: 75, gems: 10 };
 const DAILY_BONUS = { gems: 30 };
+
+// ---------- play streak ----------
+// One run of a minute or more each day keeps it going. Freezes cover missed days automatically.
+const STREAK_MIN_TIME = 60;
+const STREAK_FREEZES = 2;
+const STREAK_EARN_BACK = 3; // runs within 3 days of losing a streak bring it back
+const STREAK_MILESTONES = [
+  { days: 3, reward: { gems: 20 } },
+  { days: 7, reward: { gems: 40, egg: 'basic' } },
+  { days: 14, reward: { gems: 60, trail: 'ember' } },
+  { days: 30, reward: { gems: 100, egg: 'royal' } },
+  { days: 50, reward: { gems: 150, trail: 'aurora' } },
+  { days: 100, reward: { gems: 300, egg: 'royal' } },
+  { days: 365, reward: { gems: 1000, trail: 'prism' } },
+];
+
+// ---------- cosmetics ----------
+const TRAILS = {
+  ember: { name: 'Ember', colors: ['#ff8a3c', '#ffd447', '#ff4b5c'] },
+  toxic: { name: 'Toxic', colors: ['#b6ff3d', '#6dff9a'] },
+  frost: { name: 'Frost', colors: ['#c8fbff', '#7db8ff', '#39f3ff'] },
+  royal: { name: 'Royal', colors: ['#c77dff', '#ff7ae0', '#ffd447'] },
+  aurora: { name: 'Aurora', colors: ['#6dff9a', '#39f3ff', '#c77dff'] },
+  prism: { name: 'Prism', colors: ['#ff3d8b', '#ff8a3c', '#ffd447', '#6dff9a', '#39f3ff', '#c77dff'] },
+};
+
+// ---------- Neon Pass: a free 30-tier track that resets every 4 weeks ----------
+const SEASON_EPOCH = Date.UTC(2026, 0, 5); // a Monday
+const SEASON_DAYS = 28;
+const PASS_TIER_XP = 100;
+const PASS_XP = { run: 10, perHalfMinute: 1, firstRunOfDay: 20, dailyQuest: 40, dailyBonus: 60, weekly: 150 };
+const PASS_REWARDS = [
+  null, // tier numbers start at 1
+  { gold: 100 }, { gems: 10 }, { gold: 150 }, { gems: 15 }, { egg: 'basic' },
+  { gold: 200 }, { gems: 20 }, { gold: 250 }, { gems: 20 }, { trail: 'season' },
+  { gold: 300 }, { gems: 25 }, { gold: 300 }, { gems: 25 }, { egg: 'basic' },
+  { gold: 350 }, { gems: 30 }, { gold: 400 }, { gems: 30 }, { trail: 'season2' },
+  { gold: 450 }, { gems: 35 }, { gold: 500 }, { gems: 40 }, { egg: 'basic' },
+  { gold: 600 }, { gems: 45 }, { gold: 700 }, { gems: 50 }, { egg: 'royal', gems: 50 },
+];
+const PASS_TIERS = PASS_REWARDS.length - 1;
+// Season trails rotate so each season has its own look; past ones can come back later.
+const SEASON_TRAILS = [['frost', 'royal'], ['toxic', 'ember'], ['royal', 'aurora'], ['ember', 'frost']];
+
+// ---------- weekly challenges ----------
+const WEEKLY_POOL = [
+  { id: 'wkills', text: 'Destroy {g} enemies', goal: 4000, stat: 'kills' },
+  { id: 'wchests', text: 'Open {g} chests', goal: 12, stat: 'chests' },
+  { id: 'wbeacons', text: 'Complete {g} beacons', goal: 6, stat: 'beacons' },
+  { id: 'wtime', text: 'Survive {g} in total', goal: 1800, stat: 'time', time: true },
+  { id: 'wevo', text: 'Evolve {g} weapons', goal: 4, stat: 'evolutions' },
+  { id: 'wwardens', text: 'Defeat {g} Wardens', goal: 6, stat: 'wardens' },
+  { id: 'welites', text: 'Defeat {g} elites', goal: 15, stat: 'elites' },
+  { id: 'wdaily', text: 'Play {g} daily runs', goal: 3, stat: 'dailyRuns' },
+  { id: 'wlevel', text: 'Reach level {g} in one run', goal: 28, stat: 'level', best: true },
+  { id: 'wwin', text: 'Defeat the Queen', goal: 1, stat: 'wins' },
+  { id: 'wpilots', text: 'Play runs with {g} different pilots', goal: 3, stat: 'pilots' },
+  { id: 'wgold', text: 'Earn {g} gold', goal: 2500, stat: 'gold' },
+];
+const WEEKLY_COUNT = 4;
+const WEEKLY_REWARD = { gold: 150 };
+
+// ---------- weekly leagues (online) ----------
+const LEAGUES = [
+  null,
+  { name: 'Spark', color: '#a39fd0' }, { name: 'Pulse', color: '#39f3ff' }, { name: 'Surge', color: '#6dff9a' },
+  { name: 'Flux', color: '#ffd447' }, { name: 'Nova', color: '#ff8a3c' }, { name: 'Quasar', color: '#ff3d8b' },
+  { name: 'Singularity', color: '#c77dff' },
+];
+const LEAGUE_PROMOTE = 5;
+const LEAGUE_DEMOTE = 3;
+
+// ---------- drone patrol (idle rewards) ----------
+const PATROL_CAP_H = 12;
+const PATROL_MIN_MIN = 20; // minutes before there is anything to collect
+
+// ---------- welcome back ----------
+const COMEBACK_DAYS = 3;
 
 // 7-day login calendar; advances one step per day you claim, never resets.
 const LOGIN_REWARDS = [
