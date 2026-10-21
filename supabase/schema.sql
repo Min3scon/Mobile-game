@@ -832,6 +832,20 @@ begin
     where s.flagged order by s.created_at desc limit 50) t), '[]'::json);
 end $$;
 
+-- Everyone who is banned right now, newest ban first.
+create or replace function public.admin_banned() returns json
+language plpgsql stable security definer set search_path = public as $$
+begin
+  perform public.ns_admin();
+  return coalesce((select json_agg(t) from (
+    select b.user_id, coalesce(p.username, 'No name') as username, b.until, b.reason, b.created_at, coalesce(a.username, 'Admin') as by_name
+    from public.bans b
+    left join public.profiles p on p.id = b.user_id
+    left join public.profiles a on a.id = b.banned_by
+    where b.lifted_at is null and (b.until is null or b.until > now())
+    order by b.created_at desc limit 100) t), '[]'::json);
+end $$;
+
 -- Players with flagged scores or tamper reports, most suspicious first.
 create or replace function public.admin_suspects() returns json
 language plpgsql stable security definer set search_path = public as $$
@@ -886,7 +900,7 @@ revoke execute on all functions in schema public from public, anon, authenticate
 grant execute on function public.username_available(text), public.leaderboard(text, date, int), public.current_raid(), public.duel_get(text) to anon, authenticated;
 grant execute on function
   public.save_put(jsonb), public.save_get(), public.delete_account(), public.my_status(),
-  public.run_checkpoint(uuid, int, int, int, int), public.report_run(uuid, text), public.admin_suspects(),
+  public.run_checkpoint(uuid, int, int, int, int), public.report_run(uuid, text), public.admin_suspects(), public.admin_banned(),
   public.league_status(), public.league_claim(date),
   public.admin_find(text), public.admin_player(uuid), public.admin_ban(uuid, int, text), public.admin_unban(uuid),
   public.admin_flagged(), public.admin_review(bigint, boolean), public.admin_delete_scores(uuid),

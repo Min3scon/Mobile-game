@@ -80,7 +80,7 @@ The account named exactly **Minescon** is the admin. The admin gets an **Admin**
 
 - search players and see their scores, tamper reports and ban history;
 - ban for 1 hour, 1 day, 3 days, 1 week, 30 days or permanently, or for any number of minutes, hours, days or weeks, with a reason the player sees;
-- lift a ban;
+- lift a ban, from the player's page or from the **Banned** tab, which lists everyone banned right now with an **Unban** button on each;
 - approve or remove flagged scores;
 - delete all of a player's scores.
 
@@ -93,6 +93,13 @@ select private.grant_admin('Minescon');
 ```
 
 To add another admin, use the same line with their exact name.
+
+To unban someone straight from the SQL Editor:
+
+```sql
+update public.bans set lifted_at = now()
+where lifted_at is null and user_id = (select id from public.profiles where username = 'TheirName');
+```
 
 ## Updating the database
 
