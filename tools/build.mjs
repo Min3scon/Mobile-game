@@ -20,7 +20,8 @@ if (!scripts.length) throw new Error('No game scripts found in index.html');
 
 const joined = scripts.map((f) => `// ${f}\n${read(f)}`).join('\n');
 const out = await minify(`(function () {\n${joined}\n})();`, {
-  compress: { passes: 2, drop_debugger: true },
+  // Keep debugger statements: the run guard uses one to notice open developer tools.
+  compress: { passes: 2, drop_debugger: false },
   mangle: true,
   format: { comments: false },
 });
@@ -37,8 +38,11 @@ if (!block.test(html)) throw new Error('Script block markers not found in index.
 const config = read('config.js');
 const configName = `config.${hash(config)}.js`;
 fs.writeFileSync(path.join(dist, configName), config);
+// The build id goes into the page and into version.json; players reload when they differ.
+const build = hash(out.code + css + config);
+fs.writeFileSync(path.join(dist, 'version.json'), JSON.stringify({ build }));
 const page = html
-  .replace(block, `<script src="${configName}"></script>\n<script src="${appName}"></script>`)
+  .replace(block, `<script>window.NS_BUILD = '${build}';</script>\n<script src="${configName}"></script>\n<script src="${appName}"></script>`)
   .replace('href="style.css"', `href="${cssName}"`);
 fs.writeFileSync(path.join(dist, 'index.html'), page);
 
@@ -57,4 +61,5 @@ const sw = read('tools/sw.template.js')
 fs.writeFileSync(path.join(dist, 'sw.js'), sw);
 
 const kb = (n) => (n / 1024).toFixed(0) + ' KB';
+console.log(`Build ${build}`);
 console.log(`Built dist/: ${appName} (${kb(out.code.length)} from ${scripts.length} files, ${kb(joined.length)} source), ${cssName}`);

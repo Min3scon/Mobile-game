@@ -3,13 +3,14 @@
 
 const UI = (() => {
   const el = (id) => document.getElementById(id);
-  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const esc = escHtml;
   let api = null;
   let levelChoices = [];
   let toastTimer = 0, confirmReset = 0, confirmQuit = 0;
   const counters = [];
   let lbBoard = 'all', questTab = 'daily', hangarTab = 'pilots', acctTab = 'login', busy = false;
   let lastResult = null, raidCache = null, onlineCount = 0, joinedDuel = null, pendingJoin = null;
+  let status = null, banLine = '', adminTab = 'find', adminQuery = '', adminSel = null, confirmWipe = 0;
   const GEM = '#ff7ae0';
 
   const isStandalone = () => window.navigator.standalone === true || (window.matchMedia && matchMedia('(display-mode: standalone)').matches);
@@ -105,6 +106,7 @@ const UI = (() => {
           <button class="rank-pill" data-act="go" data-to="rank" aria-label="Rank ${save.rank}">${icon('medal')}<b>${save.rank}</b>${rc ? '<i class="ping"></i>' : ''}</button>
           <span class="bar-right">${wallet()}<button class="icon-btn" data-act="go" data-to="settings" aria-label="Settings">${icon('gear')}</button></span>
         </header>
+        ${status && status.ban ? `<p class="ban-note">${icon('ban')}<span>${esc(banLine)}. You can still play, but scores, raids and duels are off.</span></p>` : ''}
         <h1 class="logo" aria-label="Neon Swarm"><span class="l1">NEON</span><span class="l2">SWARM</span></h1>
         <button class="pilot-chip" data-act="go" data-to="pilots" style="--c:${c.color}">
           ${shipSvg(c.color)}
@@ -325,7 +327,9 @@ const UI = (() => {
         ${row('duel', 'swords', 'Duels', 'Same seed as a friend. Higher score wins')}
         ${row('raid', 'boss', r ? esc(r.name) : 'Weekly raid', r ? (r.defeated ? 'Defeated! Claim your reward' : `${fmtInt(r.hp)} HP left`) : 'Everyone damages one giant boss', r && !r.defeated ? `<span class="bossbar"><i style="width:${(r.hp / r.maxHp) * 100}%"></i></span>` : '')}
         ${row('board', 'star', 'Leaderboard', 'All time, this week and today')}
-      </div></div>`;
+        ${status && status.admin ? row('admin', 'shield', 'Admin', 'Players, bans and flagged scores') : ''}
+      </div>
+      ${status && status.ban ? `<p class="ban-note">${icon('ban')}<span>${esc(banLine)}</span></p>` : ''}</div>`;
   }
 
   // ---------- leaderboard ----------
@@ -461,6 +465,82 @@ const UI = (() => {
         <small>${status} · you ${fmtInt(mine || 0)}${d.done ? ` vs ${fmtInt(theirs || 0)}` : ''}</small></div>
         <div class="r-act">${!d.done && d.isCreator ? `<button class="btn sm" data-act="copy" data-text="${d.code}">${icon('copy')} Code</button>` : ''}</div></div>`;
     }).join('') : '<p class="lead">No duels yet.</p>';
+  }
+
+  // ---------- admin ----------
+  const BAN_PRESETS = [['1 hour', 60], ['1 day', 1440], ['3 days', 4320], ['1 week', 10080], ['30 days', 43200], ['Permanent', null]];
+  const when = (ts) => new Date(ts).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+  const banChip = (b) => (b ? `<span class="chip bad">${icon('ban')} ${b.until ? 'until ' + when(b.until) : 'permanent'}</span>` : '');
+  const banLength = (min) => (min == null ? 'permanently' : min % 10080 === 0 ? `for ${min / 10080} week${min > 10080 ? 's' : ''}`
+    : min % 1440 === 0 ? `for ${min / 1440} day${min > 1440 ? 's' : ''}` : min % 60 === 0 ? `for ${min / 60} hour${min > 60 ? 's' : ''}` : `for ${min} minute${min > 1 ? 's' : ''}`);
+
+  function playerRow(p) {
+    return `<button class="row adm-p" data-act="adm-open" data-id="${esc(p.id)}"><div class="r-main"><b>${esc(p.username || 'No name')}${p.admin ? ' <em class="code-tag">ADMIN</em>' : ''}</b>
+      <small>Best ${p.best ? fmtInt(p.best) : '-'} · ${fmtInt(p.runs)} runs${p.flagged ? ` · ${p.flagged} flagged` : ''}${p.tamper ? ` · ${p.tamper} tamper` : ''}</small></div>${banChip(p.ban)}</button>`;
+  }
+
+  async function renderAdmin() {
+    const s = el('scr-admin');
+    const gate = needOnline('Admin tools') || (status && status.admin ? '' : `<div class="empty">${icon('shield')}<b>Admins only</b></div>`);
+    if (gate) { s.innerHTML = `<div class="wrap">${header('Admin', 'online')}${gate}</div>`; return; }
+    if (adminSel) return renderAdminPlayer();
+    const t = tabs([['find', 'Players'], ['flagged', 'Flagged'], ['suspects', 'Suspects']], adminTab, 'admtab');
+    const search = adminTab === 'find' ? `<form class="join-row" id="adm-form"><input id="adm-q" class="field" maxlength="16" autocomplete="off" autocapitalize="off" placeholder="Search players" value="${esc(adminQuery)}"><button class="btn sm primary" type="submit">${icon('search')}</button></form>` : '';
+    s.innerHTML = `<div class="wrap">${header('Admin', 'online')}${t}${search}<div class="list" id="adm-list"><p class="lead">Loading…</p></div></div>`;
+    const form = el('adm-form');
+    if (form) form.addEventListener('submit', (e) => { e.preventDefault(); adminQuery = el('adm-q').value.trim(); renderAdmin(); });
+    const tab = adminTab;
+    const res = tab === 'find' ? await Online.admin('find', { p_query: adminQuery }) : await Online.admin(tab, {});
+    if (current() !== 'scr-admin' || adminSel || tab !== adminTab) return;
+    const list = el('adm-list');
+    if (!res.ok) { list.innerHTML = `<p class="lead">${esc(res.error)}</p>`; return; }
+    const rows = res.data || [];
+    if (tab === 'flagged') {
+      list.innerHTML = rows.length ? `<p class="lead">These scores passed the hard checks but looked unusual, so they are hidden until you decide.</p>` + rows.map((f) => `<div class="row toggle"><div class="r-main">
+        <b><button class="link" data-act="adm-open" data-id="${esc(f.user_id)}">${esc(f.username)}</button> · ${fmtInt(f.score)}</b>
+        <small>${fmtTime(f.time_s)} · ${fmtInt(f.kills)} kills · LV ${f.level} · ${f.mode}${f.sector > 1 ? ' S' + f.sector : ''} · ${esc(f.flag_reason || '')}</small></div>
+        <div class="r-act two-btn"><button class="btn sm" data-act="adm-review" data-id="${f.id}" data-ok="1">${icon('check')}</button><button class="btn sm danger" data-act="adm-review" data-id="${f.id}" data-ok="0">${icon('ban')}</button></div></div>`).join('')
+        : '<p class="lead">Nothing to review.</p>';
+    } else {
+      list.innerHTML = rows.length ? rows.map(playerRow).join('') : `<p class="lead">${tab === 'suspects' ? 'No suspicious players.' : 'No players found.'}</p>`;
+    }
+  }
+
+  async function renderAdminPlayer() {
+    const s = el('scr-admin'), id = adminSel;
+    s.innerHTML = `<div class="wrap">${header('Player', 'online')}<button class="link" data-act="adm-back">${icon('back')} All players</button><p class="lead">Loading…</p></div>`;
+    const res = await Online.admin('player', { p_user: id });
+    if (current() !== 'scr-admin' || adminSel !== id) return;
+    if (!res.ok || !res.data || !res.data.player) { s.querySelector('.lead').textContent = (res && res.error) || 'Player not found'; return; }
+    const { player: p, scores, bans } = res.data, tamper = res.data.tamper || [];
+    s.innerHTML = `<div class="wrap">${header('Player', 'online')}<button class="link back-link" data-act="adm-back">${icon('back')} All players</button>
+      <div class="acct-card">${icon('user')}<b>${esc(p.username || 'No name')}</b><small>Joined ${p.joined ? when(p.joined) : '?'} · ${fmtInt(p.runs)} runs · best ${p.best ? fmtInt(p.best) : '-'}</small>${banChip(p.ban)}</div>
+      ${p.admin ? '<p class="lead">Admins cannot be banned.</p>' : `
+      <h3 class="sec">Ban</h3>
+      ${p.ban ? `<p class="ban-note">${icon('ban')}<span>Banned ${p.ban.until ? 'until ' + when(p.ban.until) : 'permanently'}${p.ban.reason ? ': ' + esc(p.ban.reason) : ''}</span></p><button class="btn primary" data-act="adm-unban">Unban now</button>` : ''}
+      <input id="adm-reason" class="field" maxlength="200" placeholder="Reason (the player sees this)">
+      <div class="ban-grid">${BAN_PRESETS.map(([l, m]) => `<button class="btn sm ${m == null ? 'danger' : ''}" data-act="adm-ban" data-min="${m == null ? '' : m}">${l}</button>`).join('')}</div>
+      <div class="ban-custom"><input id="adm-len" class="field" type="number" inputmode="numeric" min="1" placeholder="Length">
+        <select id="adm-unit" class="field"><option value="1">minutes</option><option value="60" selected>hours</option><option value="1440">days</option><option value="10080">weeks</option></select>
+        <button class="btn sm danger" data-act="adm-ban-custom">Ban</button></div>`}
+      <h3 class="sec">Scores <span>${scores.length}</span></h3>
+      <div class="list">${scores.map((x) => `<div class="row toggle ${x.flagged ? 'flag' : ''}"><div class="r-main"><b>${fmtInt(x.score)}${x.flagged ? ' <em class="code-tag">FLAGGED</em>' : ''}</b>
+        <small>${fmtTime(x.time_s)} · ${fmtInt(x.kills)} kills · LV ${x.level} · ${x.mode}${x.won ? ' · won' : ''}${x.flag_reason ? ' · ' + esc(x.flag_reason) : ''}</small></div></div>`).join('') || '<p class="lead">No scores.</p>'}</div>
+      ${scores.length ? `<button class="btn danger" data-act="adm-wipe">Delete all their scores</button>` : ''}
+      ${tamper.length ? `<h3 class="sec">Tamper reports <span>${tamper.length}</span></h3><div class="list">${tamper.map((x) => `<div class="row toggle"><div class="r-main"><b>${esc(x.tamper)}</b><small>${when(x.started_at)} · ${x.mode}</small></div></div>`).join('')}</div>` : ''}
+      <h3 class="sec">Ban history <span>${bans.length}</span></h3>
+      <div class="list">${bans.map((b) => `<div class="row toggle"><div class="r-main"><b>${b.until ? 'Until ' + when(b.until) : 'Permanent'}${b.lifted_at ? ' · lifted' : ''}</b>
+        <small>${when(b.created_at)} by ${esc(b.by_name || 'admin')}${b.reason ? ' · ' + esc(b.reason) : ''}</small></div></div>`).join('') || '<p class="lead">Never banned.</p>'}</div>
+    </div>`;
+    s.dataset.name = p.username || 'this player';
+  }
+
+  function confirmBan(minutes) {
+    const name = el('scr-admin').dataset.name, reason = (el('adm-reason') || {}).value || '';
+    modal(`<h2 class="title">Ban ${esc(name)}?</h2><p class="sub">${esc(name)} will be banned ${banLength(minutes)}.${reason.trim() ? ` Reason: ${esc(reason.trim())}` : ''}</p>
+      <button class="btn danger" data-act="adm-ban-go" data-min="${minutes == null ? '' : minutes}">Ban ${banLength(minutes)}</button>
+      <button class="btn ghost" data-act="modal-close">Cancel</button>`);
+    el('modal').dataset.reason = reason.trim();
   }
 
   // ---------- co-op lobby ----------
@@ -756,7 +836,7 @@ const UI = (() => {
 
   const RENDER = {
     hangar: renderHangar, quests: renderQuests, online: renderOnline, board: renderBoard,
-    account: renderAccount, raid: renderRaid, duel: renderDuel, coop: renderCoop, settings: renderSettings,
+    account: renderAccount, raid: renderRaid, duel: renderDuel, coop: renderCoop, settings: renderSettings, admin: renderAdmin,
   };
   // Old destinations now live as tabs inside the hub screens.
   const ALIAS = { pilots: ['hangar', 'pilots'], pets: ['hangar', 'pets'], shop: ['hangar', 'shop'], rank: ['quests', 'rank'] };
@@ -784,7 +864,7 @@ const UI = (() => {
     if (!id) return;
     if (id === 'scr-menu') { renderMenu(); return; }
     const key = id.slice(4);
-    if (RENDER[key] && !['board', 'raid', 'duel'].includes(key)) {
+    if (RENDER[key] && !['board', 'raid', 'duel', 'admin'].includes(key)) {
       const s = el(id), top = s.scrollTop;
       RENDER[key]();
       s.scrollTop = top;
@@ -858,6 +938,11 @@ const UI = (() => {
         rerender();
         break;
       case 'claim': case 'claim-daily': case 'claim-bonus': case 'claim-rank': case 'claim-login': {
+        if ((act === 'claim-login' || act === 'claim-daily' || act === 'claim-bonus') && !Clock.synced) {
+          toast('Checking the time with the server… try again in a moment. (Daily rewards need the internet.)');
+          Updater.check();
+          return;
+        }
         const got = act === 'claim' ? claimQuest(btn.dataset.id) : act === 'claim-daily' ? claimDaily(btn.dataset.id)
           : act === 'claim-bonus' ? claimDailyBonus() : act === 'claim-rank' ? claimRankRewards() : (claimLogin() || {}).got;
         if (!got) return;
@@ -1053,6 +1138,48 @@ const UI = (() => {
         show(null);
         break;
       case 'modal-close': closeModal(); break;
+      case 'admtab': adminTab = btn.dataset.tab; renderAdmin(); break;
+      case 'adm-open': adminSel = btn.dataset.id; confirmWipe = 0; renderAdmin(); el('scr-admin').scrollTop = 0; break;
+      case 'adm-back': adminSel = null; renderAdmin(); break;
+      case 'adm-ban': confirmBan(btn.dataset.min === '' ? null : +btn.dataset.min); break;
+      case 'adm-ban-custom': {
+        const n = Math.floor(+el('adm-len').value), unit = +el('adm-unit').value;
+        if (!(n >= 1)) { toast('Enter how long the ban lasts'); return; }
+        const minutes = n * unit;
+        if (minutes > 5256000) { toast('Bans can be at most 10 years. Use Permanent instead.'); return; }
+        confirmBan(minutes);
+        break;
+      }
+      case 'adm-ban-go': {
+        const minutes = btn.dataset.min === '' ? null : +btn.dataset.min, reason = el('modal').dataset.reason || '';
+        btn.disabled = true;
+        const res = await Online.admin('ban', { p_user: adminSel, p_minutes: minutes, p_reason: reason });
+        closeModal();
+        toast(res.ok ? 'Banned ' + banLength(minutes) : res.error);
+        if (res.ok) renderAdmin();
+        return;
+      }
+      case 'adm-unban': {
+        const res = await Online.admin('unban', { p_user: adminSel });
+        toast(res.ok ? 'Ban lifted' : res.error);
+        if (res.ok) renderAdmin();
+        return;
+      }
+      case 'adm-wipe': {
+        if (Date.now() - confirmWipe > 3000) { confirmWipe = Date.now(); toast('Tap again to delete every score this player has'); return; }
+        confirmWipe = 0;
+        const res = await Online.admin('delete_scores', { p_user: adminSel });
+        toast(res.ok ? `Deleted ${res.data} scores` : res.error);
+        if (res.ok) renderAdmin();
+        return;
+      }
+      case 'adm-review': {
+        btn.disabled = true;
+        const res = await Online.admin('review', { p_score: +btn.dataset.id, p_ok: btn.dataset.ok === '1' });
+        toast(res.ok ? (btn.dataset.ok === '1' ? 'Approved: it is on the leaderboard now' : 'Score removed') : res.error);
+        renderAdmin();
+        return;
+      }
       case 'cloud-use': case 'cloud-keep':
         closeModal();
         api.cloudChoice(act === 'cloud-use');
@@ -1118,6 +1245,12 @@ const UI = (() => {
     enterGame() { closeModal(); show(null); },
     setRaid(r) { raidCache = r; if (current() === 'scr-online') renderOnline(); },
     setOnlineCount(n) { onlineCount = n; },
+    setStatus(st, line) {
+      const changed = JSON.stringify(st) !== JSON.stringify(status);
+      status = st;
+      banLine = line || '';
+      if (changed && ['scr-menu', 'scr-online'].includes(current())) rerender();
+    },
     openInvite(code) {
       pendingJoin = code;
       if (api.getGame()) return;

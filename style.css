@@ -603,3 +603,18 @@ button:focus-visible, textarea:focus-visible { outline: 2px solid var(--cyan); o
 .hub-row .bossbar { margin-top: 4px; }
 .acct-row:active, .hub-row:active { transform: scale(0.98); }
 .empty .why { color: var(--dim); font-size: 11px; opacity: 0.7; word-break: break-word; }
+
+/* ---------- v2.2: bans + admin ---------- */
+.ban-note { display: flex; gap: 8px; align-items: flex-start; margin: 0; padding: 10px 12px; border-radius: 12px; font-size: 13px; color: #ffc2cb; background: rgba(255, 75, 92, 0.12); border: 1.5px solid rgba(255, 75, 92, 0.4); text-align: left; }
+.ban-note .ic { flex: none; width: 18px; height: 18px; color: var(--red); }
+.chip.bad { color: var(--red); background: rgba(255, 75, 92, 0.12); }
+.row.adm-p { grid-template-columns: 1fr auto; text-align: left; width: 100%; font: inherit; color: inherit; }
+.row.flag { border-color: rgba(255, 212, 71, 0.45); }
+.ban-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.ban-grid .btn { width: 100%; margin: 0; }
+.ban-custom { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; }
+.ban-custom .btn { margin: 0; }
+.two-btn { gap: 6px; }
+.two-btn .btn { margin: 0; padding: 8px 10px; }
+.back-link { align-self: flex-start; display: inline-flex; align-items: center; gap: 4px; text-decoration: none; }
+.back-link .ic { width: 16px; height: 16px; }

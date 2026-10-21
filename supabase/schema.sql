@@ -6,6 +6,10 @@
 -- row. Everything else (saves, scores, raid, duels) goes through the functions below, which check a
 -- server-issued run ticket and reject impossible results.
 --
+-- Anti-cheat: runs report checkpoints every 30 seconds; scores must match them and stay under hard
+-- caps derived from the game's own spawn rates. Suspicious-but-possible scores are hidden until an
+-- admin reviews them. Banned players cannot start, post or duel.
+--
 -- Privacy: each player's cloud save is encrypted (AES-256) with a key that belongs only to them.
 -- Keys live in the separate "private" schema, which the website and players can never read.
 -- Deleting an account destroys the key first, so any leftover copy of the save is unreadable.
@@ -121,6 +125,38 @@ create table if not exists public.duels (
   completed_at timestamptz
 );
 
+alter table public.runs add column if not exists tamper text;
+alter table public.scores add column if not exists flagged boolean not null default false;
+alter table public.scores add column if not exists flag_reason text;
+
+create table if not exists public.run_checkpoints (
+  run_id uuid not null references public.runs on delete cascade,
+  seq int not null,
+  at timestamptz not null default now(),
+  t int not null,
+  kills int not null,
+  level int not null,
+  primary key (run_id, seq)
+);
+
+create table if not exists public.bans (
+  id bigserial primary key,
+  user_id uuid not null references auth.users on delete cascade,
+  reason text,
+  banned_by uuid references auth.users on delete set null,
+  created_at timestamptz not null default now(),
+  until timestamptz,
+  lifted_at timestamptz
+);
+create index if not exists bans_user on public.bans (user_id);
+
+create table if not exists private.admins (
+  user_id uuid primary key references auth.users on delete cascade,
+  created_at timestamptz not null default now()
+);
+alter table private.admins enable row level security;
+revoke all on private.admins from public, anon, authenticated;
+
 -- ---------- access rules ----------
 alter table public.profiles enable row level security;
 alter table public.runs enable row level security;
@@ -128,12 +164,14 @@ alter table public.scores enable row level security;
 alter table public.raids enable row level security;
 alter table public.raid_hits enable row level security;
 alter table public.duels enable row level security;
+alter table public.run_checkpoints enable row level security;
+alter table public.bans enable row level security;
 
 drop policy if exists "own profile read" on public.profiles;
 create policy "own profile read" on public.profiles for select using (auth.uid() = id);
 drop policy if exists "own profile save" on public.profiles;
 
-revoke all on public.profiles, public.runs, public.scores, public.raids, public.raid_hits, public.duels from anon, authenticated;
+revoke all on public.profiles, public.runs, public.scores, public.raids, public.raid_hits, public.duels, public.run_checkpoints, public.bans from anon, authenticated;
 grant select (id, username, save_updated_at) on public.profiles to authenticated;
 
 -- ---------- helpers ----------
@@ -143,6 +181,47 @@ begin
   if auth.uid() is null then raise exception 'Log in first'; end if;
   return auth.uid();
 end $$;
+
+-- Names are unique (ignoring capitals, so MINESCON can't copy Minescon; Min3scon is a different name).
+create or replace function public.ns_name_ok(n text) returns boolean
+language sql immutable as $$
+  select n ~ '^[A-Za-z0-9_]{3,16}$'
+     and lower(n) not in ('admin', 'administrator', 'moderator', 'staff', 'support', 'system', 'neonswarm', 'null', 'undefined')
+$$;
+
+create or replace function public.ns_is_admin() returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from private.admins where user_id = auth.uid())
+$$;
+
+create or replace function public.ns_active_ban(uid uuid) returns public.bans
+language sql stable security definer set search_path = public as $$
+  select * from public.bans where user_id = uid and lifted_at is null and (until is null or until > now())
+  order by coalesce(until, 'infinity'::timestamptz) desc limit 1
+$$;
+
+-- Like ns_me(), but refuses banned players. Used by everything that affects other players.
+create or replace function public.ns_play() returns uuid
+language plpgsql stable security definer set search_path = public as $$
+declare uid uuid := public.ns_me(); b public.bans;
+begin
+  b := public.ns_active_ban(uid);
+  if b.id is not null then
+    if b.until is null then raise exception 'You are banned permanently%', coalesce(': ' || b.reason, '');
+    else raise exception 'You are banned until % UTC%', to_char(b.until at time zone 'utc', 'YYYY-MM-DD HH24:MI'), coalesce(': ' || b.reason, '');
+    end if;
+  end if;
+  return uid;
+end $$;
+
+-- Most enemies the game can spawn by game time t (seconds), with generous headroom. Mirrors the
+-- director in game.js: 2 + 18*(t/480)^1.5 spawns/s, ~300 event enemies, splitter shards, then the
+-- Queen fight. Daily runs can have 60% more enemies.
+create or replace function public.ns_max_kills(p_t int, p_mode text) returns int
+language sql immutable as $$
+  select ceil(((2 * least(p_t, 480) + 3456 * power(least(p_t, 480) / 480.0, 2.5) + 8 * greatest(p_t - 480, 0)) + 300)
+    * case when p_mode = 'daily' then 1.6 else 1.0 end * 1.6)::int
+$$;
 
 -- Score multiplier per sector; must match SECTORS[n].reward in the game.
 create or replace function public.ns_sector_mult(s int) returns numeric
@@ -169,7 +248,10 @@ create or replace function public.handle_new_user() returns trigger
 language plpgsql security definer set search_path = public as $$
 declare wanted text := new.raw_user_meta_data ->> 'username';
 begin
-  if wanted is null or wanted !~ '^[A-Za-z0-9_]{3,16}$' then wanted := null; end if;
+  if wanted is null or not public.ns_name_ok(wanted)
+     or exists (select 1 from public.profiles where lower(username) = lower(wanted)) then
+    wanted := null;
+  end if;
   begin
     insert into public.profiles (id, username) values (new.id, wanted) on conflict (id) do nothing;
   exception when unique_violation then
@@ -183,14 +265,15 @@ create trigger on_auth_user_created after insert on auth.users for each row exec
 
 create or replace function public.username_available(p_name text) returns boolean
 language sql stable security definer set search_path = public as $$
-  select p_name ~ '^[A-Za-z0-9_]{3,16}$' and not exists (select 1 from public.profiles where lower(username) = lower(p_name))
+  select public.ns_name_ok(p_name) and not exists (select 1 from public.profiles where lower(username) = lower(p_name))
 $$;
 
 create or replace function public.claim_username(p_name text) returns text
 language plpgsql security definer set search_path = public as $$
-declare uid uuid := public.ns_me();
+declare uid uuid := public.ns_play();
 begin
   if p_name !~ '^[A-Za-z0-9_]{3,16}$' then raise exception 'Names are 3-16 letters, numbers or _'; end if;
+  if not public.ns_name_ok(p_name) then raise exception 'That name is reserved'; end if;
   if exists (select 1 from public.profiles where lower(username) = lower(p_name) and id <> uid) then raise exception 'That name is taken'; end if;
   insert into public.profiles (id, username) values (uid, p_name) on conflict (id) do update set username = excluded.username;
   return p_name;
@@ -243,7 +326,7 @@ end $$;
 create or replace function public.start_run(p_mode text, p_sector int, p_seed bigint) returns uuid
 language plpgsql security definer set search_path = public as $$
 declare
-  uid uuid := public.ns_me();
+  uid uuid := public.ns_play();
   today date := (now() at time zone 'utc')::date;
   rid uuid;
 begin
@@ -265,18 +348,63 @@ begin
   return rid;
 end $$;
 
+-- ---------- checkpoints ----------
+-- The game reports progress every 30 seconds of play. Each report must move forward, keep pace with
+-- real time and stay under the hard caps.
+create or replace function public.run_checkpoint(p_run uuid, p_seq int, p_t int, p_kills int, p_level int) returns boolean
+language plpgsql security definer set search_path = public as $$
+declare
+  uid uuid := public.ns_play();
+  r public.runs;
+  prev public.run_checkpoints;
+  elapsed numeric;
+begin
+  select * into r from public.runs where id = p_run and user_id = uid;
+  if not found then raise exception 'Unknown run'; end if;
+  if r.used_score then raise exception 'That run is already finished'; end if;
+  select * into prev from public.run_checkpoints where run_id = p_run order by seq desc limit 1;
+  if p_seq <> coalesce(prev.seq, 0) + 1 then raise exception 'Checkpoint out of order'; end if;
+  if prev.at is not null and now() - prev.at < interval '15 seconds' then raise exception 'Checkpoints too fast'; end if;
+  elapsed := extract(epoch from now() - r.started_at);
+  if p_t > elapsed * 1.3 + 5 then raise exception 'Game clock is ahead of real time'; end if;
+  if p_t < coalesce(prev.t, 0) or p_kills < coalesce(prev.kills, 0) or p_level < coalesce(prev.level, 1) then
+    raise exception 'Checkpoint went backwards';
+  end if;
+  if p_kills > public.ns_max_kills(p_t, r.mode) then raise exception 'Impossible kill count'; end if;
+  if p_level > 10 + p_t / 10 then raise exception 'Impossible level'; end if;
+  insert into public.run_checkpoints (run_id, seq, t, kills, level) values (p_run, p_seq, p_t, p_kills, p_level);
+  return true;
+end $$;
+
+-- The game reports runs that failed its own checks (edited values, sped-up clock, developer tools).
+-- The run can no longer be posted, and admins see the report on the player's page.
+create or replace function public.report_run(p_run uuid, p_reason text) returns boolean
+language plpgsql security definer set search_path = public as $$
+begin
+  update public.runs set tamper = coalesce(nullif(left(trim(p_reason), 100), ''), 'unknown'), used_score = true
+  where id = p_run and user_id = public.ns_me() and tamper is null;
+  return true;
+end $$;
+
 -- ---------- leaderboards ----------
 -- 'all' and 'week' rank normal solo runs; 'daily' ranks the day's daily runs only.
+-- Flagged scores and banned players never appear.
+drop function if exists public.submit_score(uuid, int, int, int, int, text, boolean, int);
 create or replace function public.submit_score(
   p_run uuid, p_score int, p_time int, p_kills int, p_level int, p_pilot text, p_won boolean, p_sector int
-) returns int
+) returns json
 language plpgsql security definer set search_path = public as $$
 declare
   r public.runs;
-  uid uuid := public.ns_me();
+  uid uuid := public.ns_play();
   mult numeric;
   expected int;
   better int;
+  cp_n int; cp_t int; cp_k int; cp_l int;
+  need int;
+  cap int;
+  elapsed numeric;
+  why text := null;
 begin
   select * into r from public.runs where id = p_run and user_id = uid;
   if not found then raise exception 'Unknown run'; end if;
@@ -285,21 +413,35 @@ begin
   if r.mode not in ('normal', 'daily') then raise exception 'Only solo runs go on the leaderboard'; end if;
   if p_sector <> r.sector then raise exception 'Sector mismatch'; end if;
   if not exists (select 1 from public.profiles where id = uid and username is not null) then raise exception 'Pick a name first'; end if;
-  if p_kills < 0 or p_kills > p_time * 40 + 500 then raise exception 'Impossible kill count'; end if;
-  if p_level < 1 or p_level > 1 + p_time / 5 then raise exception 'Impossible level'; end if;
-  if p_won and p_time < 480 then raise exception 'Impossible win'; end if;
+  cap := public.ns_max_kills(p_time, r.mode);
+  if p_kills < 0 or p_kills > cap then raise exception 'Impossible kill count'; end if;
+  if p_level < 1 or p_level > 10 + p_time / 10 then raise exception 'Impossible level'; end if;
+  if p_won and p_time < 485 then raise exception 'Impossible win'; end if;
   mult := public.ns_sector_mult(r.sector);
   expected := floor((p_time * 10 + p_kills * 2 + p_level * 50 + case when p_won then 5000 else 0 end) * mult);
   if abs(p_score - expected) > 30 * mult then raise exception 'Score does not add up'; end if;
-  insert into public.scores (user_id, run_id, score, time_s, kills, level, pilot, won, sector, mode, day)
-  values (uid, r.id, p_score, p_time, p_kills, p_level, left(p_pilot, 16), p_won, r.sector, r.mode, r.day);
+  -- The run has to match what it reported along the way.
+  select count(*), max(t), max(kills), max(level) into cp_n, cp_t, cp_k, cp_l from public.run_checkpoints where run_id = r.id;
+  need := greatest(0, floor(p_time / 30.0)::int - 2);
+  if cp_n < floor(need * 0.5) then raise exception 'This run could not be verified'; end if;
+  if cp_n > 0 and (p_time < cp_t or p_kills < cp_k or p_level < cp_l) then raise exception 'Run does not match its checkpoints'; end if;
+  if cp_n > 0 and p_kills - cp_k > public.ns_max_kills(p_time, r.mode) - public.ns_max_kills(cp_t, r.mode) + 250 then
+    raise exception 'Impossible kills since the last checkpoint';
+  end if;
+  elapsed := extract(epoch from now() - r.started_at);
+  if cp_n < need then why := 'missing checkpoints';
+  elsif p_kills > cap * 0.9 then why := 'very high kill count';
+  elsif r.mode <> 'daily' and elapsed < p_time / 1.1 then why := 'game ran faster than real time';
+  end if;
+  insert into public.scores (user_id, run_id, score, time_s, kills, level, pilot, won, sector, mode, day, flagged, flag_reason)
+  values (uid, r.id, p_score, p_time, p_kills, p_level, left(p_pilot, 16), p_won, r.sector, r.mode, r.day, why is not null, why);
   update public.runs set used_score = true where id = r.id;
   select count(*) into better from (
     select user_id, max(score) as best from public.scores
-    where mode = r.mode and (r.mode <> 'daily' or day = r.day) and user_id <> uid
+    where mode = r.mode and (r.mode <> 'daily' or day = r.day) and user_id <> uid and not flagged
     group by user_id
   ) t where t.best > p_score;
-  return better + 1;
+  return json_build_object('rank', better + 1, 'flagged', why is not null);
 end $$;
 
 create or replace function public.leaderboard(p_board text, p_day date, p_limit int)
@@ -308,9 +450,10 @@ language sql stable security definer set search_path = public as $$
   with best as (
     select distinct on (s.user_id) s.user_id, s.score, s.time_s, s.kills, s.level, s.pilot, s.won, s.sector, s.created_at
     from public.scores s
-    where (p_board = 'all' and s.mode = 'normal')
+    where not s.flagged and (public.ns_active_ban(s.user_id)).id is null
+      and ((p_board = 'all' and s.mode = 'normal')
        or (p_board = 'week' and s.mode = 'normal' and s.created_at >= date_trunc('week', now()))
-       or (p_board = 'daily' and s.mode = 'daily' and s.day = coalesce(p_day, (now() at time zone 'utc')::date))
+       or (p_board = 'daily' and s.mode = 'daily' and s.day = coalesce(p_day, (now() at time zone 'utc')::date)))
     order by s.user_id, s.score desc, s.created_at asc
   )
   select rank() over (order by b.score desc), coalesce(p.username, 'Pilot'), b.score, b.time_s, b.kills, b.level, b.pilot, b.won, b.sector,
@@ -325,13 +468,13 @@ language plpgsql stable security definer set search_path = public as $$
 declare uid uuid := public.ns_me(); mine int; better int; d date := coalesce(p_day, (now() at time zone 'utc')::date);
 begin
   select max(score) into mine from public.scores
-  where user_id = uid and ((p_board = 'all' and mode = 'normal')
+  where user_id = uid and not flagged and ((p_board = 'all' and mode = 'normal')
      or (p_board = 'week' and mode = 'normal' and created_at >= date_trunc('week', now()))
      or (p_board = 'daily' and mode = 'daily' and day = d));
   if mine is null then return null; end if;
   select count(*) into better from (
     select user_id, max(score) as best from public.scores
-    where user_id <> uid and ((p_board = 'all' and mode = 'normal')
+    where user_id <> uid and not flagged and ((p_board = 'all' and mode = 'normal')
        or (p_board = 'week' and mode = 'normal' and created_at >= date_trunc('week', now()))
        or (p_board = 'daily' and mode = 'daily' and day = d))
     group by user_id
@@ -376,7 +519,7 @@ end $$;
 create or replace function public.raid_hit(p_run uuid, p_damage bigint, p_time int) returns json
 language plpgsql security definer set search_path = public as $$
 declare
-  uid uuid := public.ns_me();
+  uid uuid := public.ns_play();
   r public.runs;
   rd public.raids;
   dmg bigint;
@@ -405,7 +548,7 @@ end $$;
 create or replace function public.raid_claim(p_raid int) returns json
 language plpgsql security definer set search_path = public as $$
 declare
-  uid uuid := public.ns_me();
+  uid uuid := public.ns_play();
   rd public.raids;
   h public.raid_hits;
   top3 boolean;
@@ -435,7 +578,7 @@ $$;
 create or replace function public.duel_create(p_run uuid, p_pilot text, p_score int, p_time int, p_kills int) returns text
 language plpgsql security definer set search_path = public as $$
 declare
-  uid uuid := public.ns_me();
+  uid uuid := public.ns_play();
   r public.runs := public.ns_run(p_run, 'duel', p_time);
   alphabet text := 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   c text;
@@ -467,7 +610,7 @@ end $$;
 create or replace function public.duel_submit(p_run uuid, p_code text, p_score int, p_time int, p_kills int) returns json
 language plpgsql security definer set search_path = public as $$
 declare
-  uid uuid := public.ns_me();
+  uid uuid := public.ns_play();
   r public.runs := public.ns_run(p_run, 'duel', p_time);
   d public.duels;
 begin
@@ -493,13 +636,160 @@ language sql stable security definer set search_path = public as $$
   ) t
 $$;
 
+-- ---------- player status ----------
+create or replace function public.my_status() returns json
+language plpgsql stable security definer set search_path = public as $$
+declare uid uuid := public.ns_me(); b public.bans := public.ns_active_ban(uid);
+begin
+  return json_build_object('admin', public.ns_is_admin(),
+    'ban', case when b.id is null then null else json_build_object('until', b.until, 'reason', b.reason) end);
+end $$;
+
+-- ---------- admin ----------
+create or replace function public.ns_admin() returns uuid
+language plpgsql stable security definer set search_path = public as $$
+begin
+  if not public.ns_is_admin() then raise exception 'Admins only'; end if;
+  return auth.uid();
+end $$;
+
+create or replace function public.ns_player_json(uid uuid) returns json
+language sql stable security definer set search_path = public as $$
+  select json_build_object(
+    'id', p.id, 'username', p.username, 'joined', p.created_at,
+    'best', (select max(score) from public.scores where user_id = p.id and not flagged),
+    'runs', (select count(*) from public.runs where user_id = p.id),
+    'flagged', (select count(*) from public.scores where user_id = p.id and flagged),
+    'tamper', (select count(*) from public.runs where user_id = p.id and tamper is not null),
+    'admin', exists (select 1 from private.admins a where a.user_id = p.id),
+    'ban', (select json_build_object('until', b.until, 'reason', b.reason) from public.bans b
+            where b.user_id = p.id and b.lifted_at is null and (b.until is null or b.until > now())
+            order by coalesce(b.until, 'infinity'::timestamptz) desc limit 1))
+  from public.profiles p where p.id = uid
+$$;
+
+create or replace function public.admin_find(p_query text) returns json
+language plpgsql stable security definer set search_path = public as $$
+begin
+  perform public.ns_admin();
+  return coalesce((select json_agg(public.ns_player_json(p.id) order by p.username)
+    from (select id, username from public.profiles
+          where username is not null and (coalesce(p_query, '') = '' or username ilike '%' || p_query || '%')
+          order by username limit 30) p), '[]'::json);
+end $$;
+
+create or replace function public.admin_player(p_user uuid) returns json
+language plpgsql stable security definer set search_path = public as $$
+begin
+  perform public.ns_admin();
+  return json_build_object(
+    'player', public.ns_player_json(p_user),
+    'scores', coalesce((select json_agg(t) from (
+      select id, score, time_s, kills, level, mode, sector, won, flagged, flag_reason, created_at from public.scores
+      where user_id = p_user order by created_at desc limit 20) t), '[]'::json),
+    'tamper', coalesce((select json_agg(t) from (
+      select started_at, mode, tamper from public.runs where user_id = p_user and tamper is not null
+      order by started_at desc limit 10) t), '[]'::json),
+    'bans', coalesce((select json_agg(t) from (
+      select b.created_at, b.until, b.reason, b.lifted_at, coalesce(p.username, 'Admin') as by_name from public.bans b
+      left join public.profiles p on p.id = b.banned_by where b.user_id = p_user order by b.created_at desc limit 20) t), '[]'::json));
+end $$;
+
+-- p_minutes null = permanent.
+create or replace function public.admin_ban(p_user uuid, p_minutes int, p_reason text) returns json
+language plpgsql security definer set search_path = public as $$
+declare me uuid := public.ns_admin(); b public.bans;
+begin
+  if p_user = me then raise exception 'You cannot ban yourself'; end if;
+  if exists (select 1 from private.admins where user_id = p_user) then raise exception 'Admins cannot be banned'; end if;
+  if not exists (select 1 from public.profiles where id = p_user) then raise exception 'No such player'; end if;
+  if p_minutes is not null and (p_minutes < 1 or p_minutes > 5256000) then raise exception 'Ban length must be between 1 minute and 10 years'; end if;
+  update public.bans set lifted_at = now() where user_id = p_user and lifted_at is null;
+  insert into public.bans (user_id, reason, banned_by, until)
+  values (p_user, nullif(left(trim(p_reason), 200), ''), me, case when p_minutes is null then null else now() + make_interval(mins => p_minutes) end)
+  returning * into b;
+  return json_build_object('until', b.until, 'reason', b.reason);
+end $$;
+
+create or replace function public.admin_unban(p_user uuid) returns boolean
+language plpgsql security definer set search_path = public as $$
+begin
+  perform public.ns_admin();
+  update public.bans set lifted_at = now() where user_id = p_user and lifted_at is null;
+  return true;
+end $$;
+
+create or replace function public.admin_flagged() returns json
+language plpgsql stable security definer set search_path = public as $$
+begin
+  perform public.ns_admin();
+  return coalesce((select json_agg(t) from (
+    select s.id, s.user_id, coalesce(p.username, 'Pilot') as username, s.score, s.time_s, s.kills, s.level, s.mode, s.sector,
+           s.flag_reason, s.created_at
+    from public.scores s left join public.profiles p on p.id = s.user_id
+    where s.flagged order by s.created_at desc limit 50) t), '[]'::json);
+end $$;
+
+-- Players with flagged scores or tamper reports, most suspicious first.
+create or replace function public.admin_suspects() returns json
+language plpgsql stable security definer set search_path = public as $$
+begin
+  perform public.ns_admin();
+  return coalesce((select json_agg(public.ns_player_json(x.id) order by x.n desc) from (
+    select id, n from (
+      select p.id, (select count(*) from public.scores s where s.user_id = p.id and s.flagged)
+                 + (select count(*) from public.runs r where r.user_id = p.id and r.tamper is not null) as n
+      from public.profiles p) c
+    where n > 0 order by n desc limit 30) x), '[]'::json);
+end $$;
+
+-- Approve a flagged score (shows on the leaderboard) or remove it.
+create or replace function public.admin_review(p_score bigint, p_ok boolean) returns boolean
+language plpgsql security definer set search_path = public as $$
+begin
+  perform public.ns_admin();
+  if p_ok then update public.scores set flagged = false, flag_reason = 'approved' where id = p_score;
+  else delete from public.scores where id = p_score;
+  end if;
+  return true;
+end $$;
+
+create or replace function public.admin_delete_scores(p_user uuid) returns int
+language plpgsql security definer set search_path = public as $$
+declare n int;
+begin
+  perform public.ns_admin();
+  delete from public.scores where user_id = p_user;
+  get diagnostics n = row_count;
+  return n;
+end $$;
+
+-- Run in the SQL editor to make someone an admin: select private.grant_admin('TheirName');
+create or replace function private.grant_admin(p_name text) returns text
+language plpgsql security definer set search_path = '' as $$
+declare uid uuid;
+begin
+  select id into uid from public.profiles where username = p_name;
+  if uid is null then return 'No player named ' || p_name || '. Sign up with that name first, then run this again.'; end if;
+  insert into private.admins (user_id) values (uid) on conflict do nothing;
+  return p_name || ' is now an admin';
+end $$;
+revoke all on function private.grant_admin(text) from public, anon, authenticated;
+
 -- ---------- who may call what ----------
 revoke execute on all functions in schema public from public, anon, authenticated;
 grant execute on function public.username_available(text), public.leaderboard(text, date, int), public.current_raid(), public.duel_get(text) to anon, authenticated;
 grant execute on function
-  public.save_put(jsonb), public.save_get(), public.delete_account(),
+  public.save_put(jsonb), public.save_get(), public.delete_account(), public.my_status(),
+  public.run_checkpoint(uuid, int, int, int, int), public.report_run(uuid, text), public.admin_suspects(),
+  public.admin_find(text), public.admin_player(uuid), public.admin_ban(uuid, int, text), public.admin_unban(uuid),
+  public.admin_flagged(), public.admin_review(bigint, boolean), public.admin_delete_scores(uuid),
   public.claim_username(text), public.start_run(text, int, bigint),
   public.submit_score(uuid, int, int, int, int, text, boolean, int), public.my_best(text, date),
   public.raid_hit(uuid, bigint, int), public.raid_claim(int),
   public.duel_create(uuid, text, int, int, int), public.duel_submit(uuid, text, int, int, int), public.my_duels()
   to authenticated;
+
+-- ---------- admin ----------
+-- The account named exactly Minescon is the game's admin.
+select private.grant_admin('Minescon');

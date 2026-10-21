@@ -30,9 +30,11 @@ class Game {
     this.clock = 0;
     this.acc = 0;
     this.kills = 0;
+    this.spawned = 0;
     this.level = 1;
     this.xp = 0;
     this.xpNext = xpForLevel(1);
+    this.sealSet();
     this.uid = 0;
     this.enemies = [];
     this.bullets = [];
@@ -95,8 +97,24 @@ class Game {
       if (DEBUG.startAt) this.skipTo(DEBUG.startAt);
       else if (this.role !== 'client') this.openingWave();
     }
+    this.sealSet();
     this.cam.x = this.local.x;
     this.cam.y = this.local.y + View.h * 0.08;
+  }
+
+  // Masked copies of the counters the server checks. Editing one in memory (debugger, extension)
+  // leaves its copy behind, and the run is not posted.
+  sealSet() {
+    if (!this.seal) this.seal = { m: (Math.random() * 0x7fffffff) | 0 };
+    const S = this.seal;
+    S.k = this.kills ^ S.m;
+    S.l = this.level ^ S.m;
+    S.s = this.spawned ^ S.m;
+  }
+
+  sealOk() {
+    const S = this.seal;
+    return (S.k ^ S.m) === this.kills && (S.l ^ S.m) === this.level && (S.s ^ S.m) === this.spawned && this.kills <= this.spawned;
   }
 
   // Compatibility views of the local player for UI and rendering code.
@@ -459,6 +477,8 @@ class Game {
       tele: 0, charge: 0, dx: 0, dy: 0, bladeCd: 0, slowT: 0, spin: SPINNERS.has(d.shape), fire: 0, spiral: 0, shieldT: 0,
     };
     this.enemies.push(e);
+    this.spawned++;
+    this.seal.s = this.spawned ^ this.seal.m;
     return e;
   }
 
@@ -473,6 +493,8 @@ class Game {
       phase: 0, shieldT: 0, fightT: 0,
     };
     this.enemies.push(e);
+    this.spawned++;
+    this.seal.s = this.spawned ^ this.seal.m;
     this.boss = e;
     return e;
   }
@@ -883,6 +905,7 @@ class Game {
   killEnemy(e, sh) {
     e.dead = true;
     this.kills++;
+    this.seal.k = this.kills ^ this.seal.m;
     this.burst(e.x, e.y, e.boss ? 40 : e.elite ? 18 : Math.min(10, Math.round(4 + e.r * 0.3)), e.d.color, e.boss ? 320 : 180);
     Sound.play.kill();
     if (e.boss) {
@@ -1162,6 +1185,7 @@ class Game {
     while (this.xp >= this.xpNext) {
       this.xp -= this.xpNext;
       this.level++;
+      this.seal.l = this.level ^ this.seal.m;
       this.xpNext = xpForLevel(this.level);
       this.pendingLevels++;
     }
@@ -1438,6 +1462,7 @@ class Game {
       wardens: this.wardensKilled, evolved: this.evolved.slice(), pendingLevels: this.pendingLevels,
       final: this.finalSpawned, bestNoHit: L.bestNoHit, runStats: Object.assign({}, this.runStats), rerollCount: this.rerollCount,
       boss: b ? { kind: b.type, tier: b.tier, hp: b.hp / b.maxHp } : null, runId: this.runId || null,
+      spawned: this.spawned, cp: this.cp ? Object.assign({}, this.cp) : null, tainted: this.tainted || null,
     };
   }
 
@@ -1445,6 +1470,9 @@ class Game {
     const L = this.local;
     this.t = s.t;
     this.kills = s.kills;
+    this.spawned = Math.max(s.spawned || 0, s.kills);
+    if (s.cp) this.cp = Object.assign({}, s.cp);
+    if (s.tainted) this.tainted = s.tainted;
     L.gold = s.goldRun;
     this.level = s.level;
     this.xp = s.xp;
@@ -1494,6 +1522,8 @@ class Game {
     }
     this.xpNext = xpForLevel(this.level);
     for (const sh of this.ships) sh.hp = sh.stats.maxHp;
+    this.spawned = Math.max(this.spawned, this.kills);
+    this.sealSet();
   }
 
   // ---------- autopilot for balance tests ----------
