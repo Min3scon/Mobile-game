@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Neon Swarm</title>
+<meta name="description" content="A neon survivors-style arcade game for your phone. Survive 8 minutes and destroy the Hive Queen.">
+<meta name="theme-color" content="#0a0820">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Neon Swarm">
+<meta name="format-detection" content="telephone=no">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Monoton&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<!--app-->
+<canvas id="game" aria-label="Neon Swarm play field"></canvas>
+<div id="hud" hidden>
+  <button id="btn-mute" class="hud-btn" data-act="mute" aria-label="Mute sound"></button>
+  <button id="btn-pause" class="hud-btn" data-act="pause" aria-label="Pause"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M8 5v14M16 5v14"/></svg></button>
+</div>
+<section id="scr-menu" class="screen" hidden></section>
+<section id="scr-pilots" class="screen" hidden></section>
+<section id="scr-shop" class="screen" hidden></section>
+<section id="scr-quests" class="screen" hidden></section>
+<section id="scr-settings" class="screen" hidden></section>
+<section id="scr-level" class="screen overlay" hidden></section>
+<section id="scr-chest" class="screen overlay" hidden></section>
+<section id="scr-pause" class="screen overlay" hidden></section>
+<section id="scr-over" class="screen" hidden></section>
+<div id="toast" role="status" aria-live="polite"></div>
+<div id="rotate"><p><b>Turn your phone upright</b>Neon Swarm plays in portrait.</p></div>
+<noscript><p class="noscript">Neon Swarm needs JavaScript turned on.</p></noscript>
+<!--/app-->
+<script src="src/util.js"></script>
+<script src="src/audio.js"></script>
+<script src="src/data.js"></script>
+<script src="src/save.js"></script>
+<script src="src/input.js"></script>
+<script src="src/render.js"></script>
+<script src="src/game.js"></script>
+<script src="src/ui.js"></script>
+<script src="src/main.js"></script>
+</body>
+</html>
