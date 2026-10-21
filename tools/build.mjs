@@ -34,8 +34,11 @@ fs.writeFileSync(path.join(dist, cssName), css);
 
 const block = /<script src="config\.js"><\/script>[\s\S]*<script src="src\/main\.js"><\/script>/;
 if (!block.test(html)) throw new Error('Script block markers not found in index.html');
+const config = read('config.js');
+const configName = `config.${hash(config)}.js`;
+fs.writeFileSync(path.join(dist, configName), config);
 const page = html
-  .replace(block, `<script src="config.js"></script>\n<script src="${appName}"></script>`)
+  .replace(block, `<script src="${configName}"></script>\n<script src="${appName}"></script>`)
   .replace('href="style.css"', `href="${cssName}"`);
 fs.writeFileSync(path.join(dist, 'index.html'), page);
 
@@ -44,9 +47,9 @@ const copy = (p) => {
   fs.mkdirSync(path.dirname(dst), { recursive: true });
   fs.cpSync(src, dst, { recursive: true });
 };
-for (const p of ['config.js', 'manifest.webmanifest', 'icons', 'vendor', '.nojekyll']) copy(p);
+for (const p of ['manifest.webmanifest', 'icons', 'vendor', '.nojekyll']) copy(p);
 
-const assets = ['./', 'index.html', appName, cssName, 'config.js', 'manifest.webmanifest', 'vendor/supabase.js',
+const assets = ['./', 'index.html', appName, cssName, configName, 'manifest.webmanifest', 'vendor/supabase.js',
   'icons/apple-touch-icon.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 const sw = read('tools/sw.template.js')
   .replace('__CACHE__', `neon-swarm-${hash(out.code + css)}`)
